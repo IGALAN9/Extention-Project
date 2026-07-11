@@ -9,10 +9,14 @@ Project ini masih dalam tahap pengembangan aktif.
 ### Progress
  
 **Selesai**
+<br>
 - [x] Reading highlighted text (baca teks yang di-highlight user di halaman)
 - [x] API integration (koneksi extension ke API model lokal)
 - [x] Checking / hasil deteksi tampil di popup extension
+<br>
+
 **Belum**
+<br>
 - [ ] Automatic text reading (scan otomatis tanpa perlu highlight manual)
 - [ ] Integrasi Facebook
 - [ ] Integrasi X (Twitter)
