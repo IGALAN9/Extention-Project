@@ -1,12 +1,23 @@
 import { useEffect, useState } from 'react';
 import './App.css';
 
+type WordScore = { word: string; score: number };
+type ArticleInfo = {
+  title: string | null;
+  source: string | null;
+  published?: string | null;
+  quality: 'clean' | 'dirty' | 'unsupported';
+  steps: Array<{ key: string; label: string; status: 'success' | 'warning' | 'fail' }>;
+};
+
 interface PredictResult {
   text: string;
   label: string;
   confidence: number;
   is_fake: boolean;
   model_scores: { bilstm: number; gru: number; cnn_bilstm: number };
+  influentialWords?: WordScore[];
+  article?: ArticleInfo;
 }
 
 interface LastResult {
@@ -18,37 +29,92 @@ interface LastResult {
 
 type Mode = 'auto' | 'manual';
 type ApiStatus = 'checking' | 'online' | 'offline';
+type AutoState = 'idle' | 'loading' | 'error';
+
+/** Bagian hasil yang dipakai oleh mode Manual dan Auto. */
+function ResultDetails({ result }: { result: LastResult }) {
+  const isFake = result.data.is_fake;
+  return (
+    <>
+      <div className={`result-pill ${isFake ? 'hoax' : 'fact'}`}>
+        <span>{isFake ? 'Terindikasi Hoaks' : 'Terindikasi Fakta'}</span>
+        <small>{(result.data.confidence * 100).toFixed(1)}% keyakinan</small>
+      </div>
+      <div className="keyword-label">5 Kata Berpengaruh:</div>
+      <div className="keywords" aria-label="Lima kata paling berpengaruh">
+        {result.data.influentialWords?.length ? (
+          result.data.influentialWords.map(({ word, score }) => (
+            <span className={isFake ? 'negative' : 'positive'} key={word} title={`Skor pengaruh XAI: ${score}`}>
+              {word}
+            </span>
+          ))
+        ) : (
+          <span className="unavailable">Penjelasan belum tersedia</span>
+        )}
+      </div>
+    </>
+  );
+}
+
+function DisabledState() {
+  return (
+    <section className="disabled-state" aria-live="polite">
+      <span aria-hidden="true">&#x23FB;</span>
+      <h1>Pemeriksaan dimatikan</h1>
+      <p>Tekan tombol power di kanan atas untuk mengaktifkan kembali extension.</p>
+    </section>
+  );
+}
 
 function Popup() {
   const [mode, setMode] = useState<Mode>('manual');
   const [result, setResult] = useState<LastResult | null>(null);
+  const [autoResult, setAutoResult] = useState<LastResult | null>(null);
   const [isEnabled, setIsEnabled] = useState(true);
   const [apiStatus, setApiStatus] = useState<ApiStatus>('checking');
+  const [autoState, setAutoState] = useState<AutoState>('idle');
+  const [autoError, setAutoError] = useState('');
 
   const checkApiStatus = () => {
     setApiStatus('checking');
-    browser.runtime
-      .sendMessage({ type: 'GET_API_STATUS' })
+    browser.runtime.sendMessage({ type: 'GET_API_STATUS' })
       .then((response) => setApiStatus(response?.online ? 'online' : 'offline'))
       .catch(() => setApiStatus('offline'));
   };
 
+  /** Ekstrak konten tab aktif, lalu analisis hasilnya menggunakan endpoint XAI. */
+  const runAutoCheck = async () => {
+    if (!isEnabled) return;
+    setAutoState('loading');
+    setAutoError('');
+    try {
+      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) throw new Error('Tab aktif tidak ditemukan.');
+      const response = await browser.runtime.sendMessage({ type: 'CHECK_AUTO_PAGE', tabId: tab.id });
+      if (!response?.success) throw new Error(response?.error || 'Gagal memeriksa artikel.');
+      setAutoResult(response.result as LastResult);
+      setAutoState('idle');
+    } catch (error) {
+      setAutoError(error instanceof Error ? error.message : 'Gagal memeriksa artikel.');
+      setAutoState('error');
+    }
+  };
+
   useEffect(() => {
-    browser.storage.local.get(['lastResult', 'extensionEnabled']).then((stored) => {
+    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled']).then((stored) => {
       if (stored.lastResult) setResult(stored.lastResult as LastResult);
+      if (stored.lastAutoResult) setAutoResult(stored.lastAutoResult as LastResult);
       if (typeof stored.extensionEnabled === 'boolean') setIsEnabled(stored.extensionEnabled);
     });
     browser.action.setBadgeText({ text: '' });
     checkApiStatus();
   }, []);
 
-  const isFake = result?.data.is_fake;
-  const statusLabel = isFake ? 'Terindikasi Hoaks' : 'Terindikasi Fakta';
-  const pageUrl = result?.url || 'WWW.EXAMPLE.COM';
+  const currentUrl = (mode === 'auto' ? autoResult?.url : result?.url) || 'WWW.EXAMPLE.COM';
 
   return (
     <main className="popup-shell">
-      {/* Sakelar global: menonaktifkan/mengaktifkan interaksi cek fakta di halaman. */}
+      {/* Sakelar global untuk mengaktifkan atau mematikan pemeriksaan. */}
       <button
         aria-label={isEnabled ? 'Matikan pemeriksaan extension' : 'Nyalakan pemeriksaan extension'}
         className={`power-button ${isEnabled ? 'is-on' : 'is-off'}`}
@@ -64,84 +130,69 @@ function Popup() {
         <span aria-hidden="true">&#x23FB;</span>
       </button>
 
-      {/* Menampilkan URL sumber dari hasil pemeriksaan terakhir. */}
-      <div className="url-pill" title={result?.url ?? undefined}>
-        URL: {pageUrl}
-      </div>
+      <div className="url-pill" title={currentUrl}>URL: {currentUrl}</div>
 
-      {/* Navigasi mode; Auto sengaja masih berupa placeholder Coming Soon. */}
       <div className="mode-switch" aria-label="Pilih mode pemeriksaan">
         <button
           className={mode === 'auto' ? 'active' : ''}
           type="button"
-          onClick={() => setMode('auto')}
-        >
-          Auto
-        </button>
-        <button
-          className={mode === 'manual' ? 'active' : ''}
-          type="button"
-          onClick={() => setMode('manual')}
-        >
-          Manual
-        </button>
+          onClick={() => { setMode('auto'); runAutoCheck(); }}
+        >Auto</button>
+        <button className={mode === 'manual' ? 'active' : ''} type="button" onClick={() => setMode('manual')}>Manual</button>
       </div>
 
-      {/* Indikator koneksi backend. Tombol ini bisa ditekan untuk mengecek ulang API. */}
       <button className={`api-status ${apiStatus}`} type="button" onClick={checkApiStatus}>
         <span aria-hidden="true" />
         {apiStatus === 'checking' ? 'Mengecek API...' : apiStatus === 'online' ? 'API terhubung' : 'API tidak terhubung'}
       </button>
 
       {mode === 'auto' ? (
-        /* Placeholder sampai fitur pemindaian otomatis diimplementasikan. */
-        <section className="coming-soon" aria-live="polite">
-          <div className="soon-icon" aria-hidden="true">✦</div>
-          <h1>Mode Otomatis</h1>
-          <p>Coming Soon</p>
-          <span>Nantinya halaman akan dipindai secara otomatis untuk membantu menemukan informasi yang perlu diperiksa.</span>
-        </section>
-      ) : !isEnabled ? (
-        /* Tampilan pengganti ketika sakelar extension sedang dimatikan. */
-        <section className="disabled-state" aria-live="polite">
-          <span aria-hidden="true">&#x23FB;</span>
-          <h1>Pemeriksaan dimatikan</h1>
-          <p>Tekan tombol power di kanan atas untuk mengaktifkan kembali extension.</p>
-        </section>
-      ) : (
-        /* Mode manual: teks pilihan, hasil prediksi, dan metadata klasifikasi. */
+        !isEnabled ? <DisabledState /> : (
+          <section className="auto-content" aria-live="polite">
+            <div className={`article-card ${autoResult ? 'has-result' : ''}`}>
+              <p>
+                {autoState === 'loading' ? 'Sedang membaca dan membersihkan artikel pada halaman ini...'
+                  : autoResult ? autoResult.text
+                    : autoError || 'Tekan tombol di bawah untuk mengekstrak artikel dari halaman ini secara otomatis.'}
+              </p>
+            </div>
+            {autoResult && (
+              <>
+                <ResultDetails result={autoResult} />
+                <div className="auto-source" title={autoResult.data.article?.title ?? undefined}>
+                  {autoResult.data.article?.title || 'Artikel tanpa judul'}
+                  <span>
+                    {autoResult.data.article?.source || 'Sumber tidak diketahui'} · {autoResult.data.article?.quality === 'clean' ? 'Konten bersih' : 'Konten perlu ditinjau'}
+                    {autoResult.data.article?.published ? ` · ${new Date(autoResult.data.article.published).toLocaleDateString('id-ID')}` : ''}
+                  </span>
+                </div>
+                {autoResult.data.article?.steps?.length ? (
+                  <details className="auto-steps">
+                    <summary>Detail ekstraksi</summary>
+                    <ul>
+                      {autoResult.data.article.steps.map((step) => (
+                        <li className={step.status} key={step.key}>{step.label}</li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
+              </>
+            )}
+            <button className="auto-action" type="button" disabled={autoState === 'loading'} onClick={runAutoCheck}>
+              {autoState === 'loading' ? 'Menganalisis artikel...' : 'Periksa halaman ini'}
+            </button>
+          </section>
+        )
+      ) : !isEnabled ? <DisabledState /> : (
         <section className="manual-content" aria-live="polite">
           <div className={result ? 'article-card has-result' : 'article-card'}>
-            <p>
-              {result
-                ? result.text
-                : 'Pilih atau highlight teks pada halaman, lalu tekan tombol “Cek Fakta” untuk memulai pemeriksaan.'}
-            </p>
+            <p>{result ? result.text : 'Pilih atau highlight teks pada halaman, lalu tekan tombol Cek Fakta untuk memulai pemeriksaan.'}</p>
           </div>
-
-          {result ? (
-            <>
-              {/* Warna hijau/merah mengikuti status fakta atau hoaks dari API. */}
-              <div className={`result-pill ${isFake ? 'hoax' : 'fact'}`}>
-                <span>{statusLabel}</span>
-                <small>{(result.data.confidence * 100).toFixed(1)}% keyakinan</small>
-              </div>
-              <div className="keyword-label">Kata Berpengaruh:</div>
-              <div className="keywords" aria-label="Kata berpengaruh">
-                <span className={isFake ? 'negative' : 'positive'}>{result.data.label || 'Analisis'}</span>
-                <span className={isFake ? 'negative' : 'positive'}>Teks pilihan</span>
-              </div>
-            </>
-          ) : (
-            <div className="checking-pill">Menunggu teks dipilih</div>
-          )}
+          {result ? <ResultDetails result={result} /> : <div className="checking-pill">Menunggu teks dipilih</div>}
         </section>
       )}
 
-      {/* Petunjuk hanya ditampilkan ketika mode manual benar-benar aktif. */}
-      {mode === 'manual' && (
-        <p className="manual-hint">Mode manual aktif — pilih teks pada halaman untuk cek fakta.</p>
-      )}
+      {mode === 'manual' && <p className="manual-hint">Mode manual aktif - pilih teks pada halaman untuk cek fakta.</p>}
     </main>
   );
 }
