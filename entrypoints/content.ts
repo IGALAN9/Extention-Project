@@ -2,6 +2,17 @@ export default defineContentScript({
   matches: ['<all_urls>'],
   main(ctx) {
     let tooltipEl: HTMLDivElement | null = null;
+    let isExtensionEnabled = true;
+
+    browser.storage.local.get('extensionEnabled').then((stored) => {
+      isExtensionEnabled = stored.extensionEnabled !== false;
+    });
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'local' && changes.extensionEnabled) {
+        isExtensionEnabled = changes.extensionEnabled.newValue !== false;
+        if (!isExtensionEnabled) removeTooltip();
+      }
+    });
 
     function removeTooltip() {
       tooltipEl?.remove();
@@ -16,34 +27,43 @@ export default defineContentScript({
         position: 'fixed',
         left: `${x}px`,
         top: `${y + 10}px`,
-        background: '#1f2937',
-        color: '#fff',
-        padding: '8px 10px',
-        borderRadius: '6px',
+        boxSizing: 'border-box',
+        width: '270px',
+        background: '#ff7945',
+        color: '#211815',
+        padding: '10px',
+        border: '4px solid #ff5a17',
+        borderRadius: '14px',
         fontSize: '12px',
-        fontFamily: 'sans-serif',
+        fontFamily: 'Arial, Helvetica, sans-serif',
         zIndex: '999999',
-        maxWidth: '280px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+        boxShadow: '3px 5px 6px rgba(30,20,14,0.35)',
         display: 'flex',
         flexDirection: 'column',
-        gap: '6px',
+        gap: '9px',
       });
 
       const preview = document.createElement('div');
       preview.textContent = `"${text.slice(0, 60)}${text.length > 60 ? '...' : ''}"`;
+      Object.assign(preview.style, {
+        lineHeight: '1.25',
+        maxHeight: '31px',
+        overflow: 'hidden',
+      });
       tooltipEl.appendChild(preview);
 
       const btn = document.createElement('button');
       btn.textContent = 'Cek Fakta';
       Object.assign(btn.style, {
-        background: '#2563eb',
-        color: '#fff',
+        background: '#fff',
+        color: '#2e2927',
         border: 'none',
-        borderRadius: '4px',
-        padding: '4px 8px',
+        borderRadius: '999px',
+        padding: '5px 10px',
         fontSize: '12px',
+        fontFamily: 'Arial, Helvetica, sans-serif',
         cursor: 'pointer',
+        boxShadow: '1px 2px 4px rgba(30,20,14,0.32)',
       });
 
       btn.addEventListener('click', async () => {
@@ -73,6 +93,10 @@ export default defineContentScript({
     // Pakai ctx.addEventListener, bukan document.addEventListener,
     // biar otomatis di-cleanup pas content script di-reload
     ctx.addEventListener(document, 'mouseup', (e) => {
+      if (!isExtensionEnabled) {
+        removeTooltip();
+        return;
+      }
       // Kalau mouseup terjadi di dalam tooltip yang sedang aktif (misal klik tombol), abaikan
       if (tooltipEl && tooltipEl.contains(e.target as Node)) {
         return;
