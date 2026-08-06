@@ -20,6 +20,36 @@ function extractArticleFromActivePage() {
     }
     return text;
   };
+  const isInstagram = /(^|\.)instagram\.com$/i.test(location.hostname);
+  const isTwitter = /(^|\.)(x|twitter)\.com$/i.test(location.hostname);
+  const extractInstagramCaption = () => {
+    const article = document.querySelector('article');
+    const candidates = article
+      ? Array.from(article.querySelectorAll('span[dir="auto"], div[dir="auto"], h1'))
+          .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+          .filter((text) => text.length >= 25)
+          .filter((text) => !/^(View all|Lihat semua|Follow|Following|Balas|Reply|Like|Suka|Translate|Terjemahkan|See translation)/i.test(text))
+      : [];
+    // Caption biasanya merupakan blok teks terpanjang di dalam article, sedangkan
+    // username, tombol, dan komentar hanya berupa teks pendek.
+    const caption = candidates.sort((a, b) => b.length - a.length)[0];
+    if (caption) return caption;
+
+    // Fallback untuk layout Instagram yang belum merender article secara lengkap.
+    const description = document.querySelector('meta[property="og:description"]')?.getAttribute('content') ?? '';
+    const colonIndex = description.indexOf(':');
+    return colonIndex >= 0 ? description.slice(colonIndex + 1).trim() : description.trim();
+  };
+  const extractTwitterCaption = () => {
+    // X menandai isi post dengan data-testid ini; selector ini menghindari media dan reply.
+    const tweetText = document.querySelector(
+      'article[data-testid="tweet"] [data-testid="tweetText"], [data-testid="tweetText"]',
+    )?.textContent?.replace(/\s+/g, ' ').trim();
+    if (tweetText) return tweetText;
+
+    const description = document.querySelector('meta[property="og:description"]')?.getAttribute('content') ?? '';
+    return description.replace(/\s+/g, ' ').trim();
+  };
   const steps = [{
     key: 'visit_url', label: `Membaca ${location.hostname.replace(/^www\./, '')}`, status: 'success',
   }];
@@ -27,17 +57,28 @@ function extractArticleFromActivePage() {
     || document.querySelector('h1')?.textContent?.trim() || document.title.trim() || null;
   steps.push({ key: 'extract_title', label: title ? 'Judul artikel berhasil ditemukan' : 'Judul artikel tidak ditemukan', status: title ? 'success' : 'warning' });
 
-  const root = document.querySelector('article, main, [role="main"]') || document.body;
-  const clone = root.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll('script, style, noscript, iframe, nav, footer, header, aside, form, button, svg, [aria-hidden="true"]').forEach((node) => node.remove());
-  const paragraphs = Array.from(clone.querySelectorAll('p, h2, h3, li'))
-    .map((node) => node.textContent?.trim() ?? '')
-    .filter((text) => text.length > 25);
-  const rawText = paragraphs.length ? paragraphs.join(' ') : (clone.textContent ?? '');
+  let rawText: string;
+  if (isInstagram) {
+    rawText = extractInstagramCaption();
+    if (rawText) steps.push({ key: 'extract_content', label: 'Caption Instagram berhasil ditemukan', status: 'success' });
+  } else if (isTwitter) {
+    rawText = extractTwitterCaption();
+    if (rawText) steps.push({ key: 'extract_content', label: 'Caption X berhasil ditemukan', status: 'success' });
+  } else {
+    const root = document.querySelector('article, main, [role="main"]') || document.body;
+    const clone = root.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('script, style, noscript, iframe, nav, footer, header, aside, form, button, svg, [aria-hidden="true"]').forEach((node) => node.remove());
+    const paragraphs = Array.from(clone.querySelectorAll('p, h2, h3, li'))
+      .map((node) => node.textContent?.trim() ?? '')
+      .filter((text) => text.length > 25);
+    rawText = paragraphs.length ? paragraphs.join(' ') : (clone.textContent ?? '');
+  }
   const content = trimLead(removeNoise(rawText)).slice(0, 10000);
-  if (content.length < 300) {
-    steps.push({ key: 'extract_content', label: 'Konten artikel terlalu singkat', status: 'fail' });
-    return { success: false, error: 'Artikel terlalu singkat untuk diperiksa otomatis. Silakan gunakan mode Manual.', steps };
+  const minimumLength = isInstagram || isTwitter ? 20 : 300;
+  if (content.length < minimumLength) {
+    const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : '';
+    steps.push({ key: 'extract_content', label: platform ? `Caption ${platform} tidak ditemukan atau terlalu singkat` : 'Konten artikel terlalu singkat', status: 'fail' });
+    return { success: false, error: platform ? `Caption ${platform} tidak ditemukan. Silakan gunakan mode Manual.` : 'Artikel terlalu singkat untuk diperiksa otomatis. Silakan gunakan mode Manual.', steps };
   }
   steps.push({ key: 'extract_content', label: 'Isi konten berhasil diekstrak', status: 'success' });
   const noiseHits = (rawText.match(/ADVERTISEMENT|IKLAN|Baca Juga|Bagikan|Dengarkan artikel/gi) ?? []).length;
@@ -75,6 +116,29 @@ export default defineBackground(() => {
       };
     };
 
+    /** Jalankan ekstraksi DOM dan XAI untuk satu tab; dipakai klik popup dan auto saat halaman dibuka. */
+    const inspectAutoPage = async (tabId: number, fallbackUrl = '') => {
+      const [injection] = await browser.scripting.executeScript({
+        target: { tabId },
+        func: extractArticleFromActivePage,
+      });
+      const extracted = injection?.result;
+      if (!extracted?.success || !extracted.article) {
+        return { success: false, error: extracted?.error || 'Artikel tidak dapat diekstrak dari halaman ini.' };
+      }
+      const data = await explainText(extracted.article.content);
+      const result = {
+        text: extracted.article.content,
+        url: extracted.article.url ?? fallbackUrl ?? extracted.article.source,
+        data: { ...data, article: extracted.article },
+        timestamp: Date.now(),
+      };
+      await browser.storage.local.set({ lastAutoResult: result });
+      browser.action.setBadgeText({ text: '1' });
+      browser.action.setBadgeBackgroundColor({ color: '#ff5a17' });
+      return { success: true, result };
+    };
+
     if (message.type === 'GET_API_STATUS') {
       return fetch('http://localhost:8000/openapi.json', { cache: 'no-store' })
         .then((response) => ({ online: response.ok }))
@@ -109,26 +173,8 @@ export default defineBackground(() => {
       return browser.storage.local.get('extensionEnabled').then(async (stored) => {
         if (stored.extensionEnabled === false) return { success: false, error: 'Pemeriksaan extension sedang dimatikan.' };
         try {
-          const [injection] = await browser.scripting.executeScript({
-            target: { tabId: message.tabId },
-            func: extractArticleFromActivePage,
-          });
-          const extracted = injection?.result;
-          if (!extracted?.success || !extracted.article) {
-            return {
-              success: false,
-              error: extracted?.error || 'Artikel tidak dapat diekstrak dari halaman ini.',
-            };
-          }
-          const data = await explainText(extracted.article.content);
-          const result = {
-            text: extracted.article.content,
-            url: extracted.article.url ?? sender.tab?.url ?? extracted.article.source,
-            data: { ...data, article: extracted.article },
-            timestamp: Date.now(),
-          };
-          await browser.storage.local.set({ lastAutoResult: result });
-          return { success: true, result };
+          await browser.storage.local.remove('lastAutoResult');
+          return await inspectAutoPage(message.tabId, sender.tab?.url ?? '');
         } catch (err) {
           const message = err instanceof Error ? err.message : '';
           const blockedPage = /Cannot access contents of url|Cannot access a chrome|Missing host permission/i.test(message);
@@ -138,6 +184,34 @@ export default defineBackground(() => {
               ? 'Mode Auto tidak dapat membaca halaman internal browser atau halaman yang dibatasi.'
               : message || 'Gagal membaca artikel pada halaman ini.',
           };
+        }
+      });
+    }
+
+    // Dikirim segera saat halaman baru terbuka agar hasil artikel sebelumnya tidak tertinggal di popup.
+    if (message.type === 'AUTO_PAGE_OPENED') {
+      return browser.storage.local.get(['extensionEnabled', 'selectedMode']).then(async (stored) => {
+        if (stored.extensionEnabled !== false && stored.selectedMode !== 'manual') {
+          await browser.storage.local.remove('lastAutoResult');
+          browser.action.setBadgeText({ text: '' });
+        }
+        return { success: true };
+      });
+    }
+
+    // Dikirim content script tepat setelah halaman baru selesai dimuat saat mode Auto aktif.
+    if (message.type === 'CHECK_AUTO_FROM_PAGE') {
+      return browser.storage.local.get(['extensionEnabled', 'selectedMode']).then(async (stored) => {
+        // selectedMode yang belum ada diperlakukan sebagai Auto agar pengguna baru langsung mendapat pemeriksaan otomatis.
+        if (stored.extensionEnabled === false || stored.selectedMode === 'manual' || !sender.tab?.id) {
+          return { success: false, skipped: true };
+        }
+        try {
+          await browser.storage.local.remove('lastAutoResult');
+          return await inspectAutoPage(sender.tab.id, sender.tab.url ?? '');
+        } catch {
+          // Tidak mengganggu halaman pengguna bila URL bukan artikel atau tidak dapat diekstrak.
+          return { success: false, skipped: true };
         }
       });
     }

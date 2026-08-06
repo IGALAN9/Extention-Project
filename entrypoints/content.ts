@@ -109,6 +109,21 @@ export default defineContentScript({
     browser.storage.local.get('extensionEnabled').then((stored) => {
       isExtensionEnabled = stored.extensionEnabled !== false;
     });
+
+    /** Mode Auto berjalan sekali setelah halaman artikel selesai dimuat. */
+    browser.storage.local.get(['extensionEnabled', 'selectedMode']).then((stored) => {
+      // Jika belum pernah memilih mode, Auto adalah default utama.
+      if (stored.extensionEnabled === false || stored.selectedMode === 'manual' || !/^https?:$/.test(location.protocol)) return;
+      const requestAutoCheck = () => {
+        // Bersihkan hasil artikel sebelumnya sebelum proses artikel baru dimulai.
+        browser.runtime.sendMessage({ type: 'AUTO_PAGE_OPENED' }).catch(() => undefined);
+        window.setTimeout(() => {
+          browser.runtime.sendMessage({ type: 'CHECK_AUTO_FROM_PAGE' }).catch(() => undefined);
+        }, 700);
+      };
+      if (document.readyState === 'complete') requestAutoCheck();
+      else window.addEventListener('load', requestAutoCheck, { once: true });
+    });
     browser.storage.onChanged.addListener((changes, areaName) => {
       if (areaName === 'local' && changes.extensionEnabled) {
         isExtensionEnabled = changes.extensionEnabled.newValue !== false;

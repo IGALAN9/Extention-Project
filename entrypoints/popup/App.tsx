@@ -67,7 +67,8 @@ function DisabledState() {
 }
 
 function Popup() {
-  const [mode, setMode] = useState<Mode>('manual');
+  // Auto adalah mode utama saat popup pertama kali dibuka.
+  const [mode, setMode] = useState<Mode>('auto');
   const [result, setResult] = useState<LastResult | null>(null);
   const [autoResult, setAutoResult] = useState<LastResult | null>(null);
   const [isEnabled, setIsEnabled] = useState(true);
@@ -101,13 +102,26 @@ function Popup() {
   };
 
   useEffect(() => {
-    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled']).then((stored) => {
+    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled', 'selectedMode']).then((stored) => {
       if (stored.lastResult) setResult(stored.lastResult as LastResult);
       if (stored.lastAutoResult) setAutoResult(stored.lastAutoResult as LastResult);
       if (typeof stored.extensionEnabled === 'boolean') setIsEnabled(stored.extensionEnabled);
+      if (stored.selectedMode === 'auto' || stored.selectedMode === 'manual') setMode(stored.selectedMode);
+      else browser.storage.local.set({ selectedMode: 'auto' });
     });
     browser.action.setBadgeText({ text: '' });
     checkApiStatus();
+  }, []);
+
+  // Popup langsung mengosongkan hasil lama saat halaman baru memulai pemeriksaan Auto.
+  useEffect(() => {
+    const handleStorageChange = (changes: Record<string, { newValue?: unknown }>, areaName: string) => {
+      if (areaName === 'local' && changes.lastAutoResult) {
+        setAutoResult((changes.lastAutoResult.newValue as LastResult | undefined) ?? null);
+      }
+    };
+    browser.storage.onChanged.addListener(handleStorageChange);
+    return () => browser.storage.onChanged.removeListener(handleStorageChange);
   }, []);
 
   const currentUrl = (mode === 'auto' ? autoResult?.url : result?.url) || 'WWW.EXAMPLE.COM';
@@ -136,9 +150,9 @@ function Popup() {
         <button
           className={mode === 'auto' ? 'active' : ''}
           type="button"
-          onClick={() => { setMode('auto'); runAutoCheck(); }}
+          onClick={() => { setMode('auto'); browser.storage.local.set({ selectedMode: 'auto' }); runAutoCheck(); }}
         >Auto</button>
-        <button className={mode === 'manual' ? 'active' : ''} type="button" onClick={() => setMode('manual')}>Manual</button>
+        <button className={mode === 'manual' ? 'active' : ''} type="button" onClick={() => { setMode('manual'); browser.storage.local.set({ selectedMode: 'manual' }); }}>Manual</button>
       </div>
 
       <button className={`api-status ${apiStatus}`} type="button" onClick={checkApiStatus}>
