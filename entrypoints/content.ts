@@ -18,6 +18,7 @@ export default defineContentScript({
         .replace(/\bBaca Juga\b/gi, '')
         .replace(/\bBagikan\b/gi, '')
         .replace(/\bDengarkan artikel\b/gi, '')
+        .replace(/\bSee less\b/gi, '')
         .replace(/\bTampilkan Ringkasan Artikel\b/gi, '')
         .replace(/Add as a preferred source on Google/gi, '')
         .replace(/\[Gambas:[^\]]+\]/gi, '')

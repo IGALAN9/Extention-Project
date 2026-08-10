@@ -9,6 +9,15 @@ function extractArticleFromActivePage() {
     .replace(/SCROLL TO CONTINUE(?: WITH CONTENT)?/gi, '')
     .replace(/GULIR UNTUK LANJUT BACA/gi, '')
     .replace(/\bIklan\b|\bBaca Juga\b|\bBagikan\b|\bDengarkan artikel\b/gi, '')
+    .replace(/\bLihat selengkapnya\b|\bSee more\b|\bSee less\b|\bShow more\b|\bShow less\b|\bTampilkan lebih sedikit\b/gi, '')
+    .replace(/Missing context\. Reviewed by third-party fact-checkers\.?/gi, '')
+    .replace(/\bSee why\b/gi, '')
+    .replace(/Scan the QR code and confirm that the codes match to log in\.?/gi, '')
+    .replace(/See more on Facebook/gi, '')
+    .replace(/This post is missing context according to third-party fact-checkers\.?/gi, '')
+    .replace(/Third-party fact-check/gi, '')
+    .replace(/^Thread[\d.,KMB]+\s*views.*?\d{4}/i, '')
+    .replace(/\bTranslate\b/gi, '')
     .replace(/\[Gambas:[^\]]+\]/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -22,6 +31,8 @@ function extractArticleFromActivePage() {
   };
   const isInstagram = /(^|\.)instagram\.com$/i.test(location.hostname);
   const isTwitter = /(^|\.)(x|twitter)\.com$/i.test(location.hostname);
+  const isFacebook = /(^|\.)facebook\.com$/i.test(location.hostname);
+  const isThreads = /(^|\.)(threads\.net|threads\.com)$/i.test(location.hostname);
   const extractInstagramCaption = () => {
     const article = document.querySelector('article');
     const candidates = article
@@ -41,14 +52,66 @@ function extractArticleFromActivePage() {
     return colonIndex >= 0 ? description.slice(colonIndex + 1).trim() : description.trim();
   };
   const extractTwitterCaption = () => {
-    // X menandai isi post dengan data-testid ini; selector ini menghindari media dan reply.
-    const tweetText = document.querySelector(
+    // X menandai isi post dengan data-testid ini. Ambil post pertama saja,
+    // karena tweetText berikutnya biasanya adalah reply/komentar.
+    const candidates = Array.from(document.querySelectorAll(
       'article[data-testid="tweet"] [data-testid="tweetText"], [data-testid="tweetText"]',
-    )?.textContent?.replace(/\s+/g, ' ').trim();
-    if (tweetText) return tweetText;
+    ))
+      .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+      .filter((text) => text.length >= 20)
+      .filter((text) => !/^(Replying to|Log in|Sign up|Translate|Show more|Show less)/i.test(text));
+    return candidates[0] ?? '';
+  };
+  const extractFacebookCaption = () => {
+    // Jangan menganggap dialog login/QR Facebook sebagai caption post.
+    if (/Scan the QR code and confirm that the codes match to log in/i.test(document.body.textContent ?? '')) {
+      return '';
+    }
 
-    const description = document.querySelector('meta[property="og:description"]')?.getAttribute('content') ?? '';
-    return description.replace(/\s+/g, ' ').trim();
+    // Tutup panel fact-checker Facebook yang menutupi caption Reels.
+    const overlayCandidates = Array.from(document.querySelectorAll('[role="dialog"], div'))
+      .filter((node) => {
+        const text = node.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+        return /Missing context\. Reviewed by third-party fact-checkers/i.test(text) && text.length < 800;
+      })
+      .sort((a, b) => (b.textContent?.length ?? 0) - (a.textContent?.length ?? 0));
+    const overlay = overlayCandidates[0];
+    if (overlay) {
+      const closeButton = overlay.querySelector('[aria-label="Close"], [aria-label="Tutup"], button');
+      if (closeButton instanceof HTMLElement) closeButton.click();
+      else overlay.remove();
+    }
+
+    // Caption post Facebook biasanya berada di container ini, termasuk post video.
+    const messageRoot = document.querySelector(
+      '[data-ad-comet-preview="message"], [data-testid="post_message"]',
+    );
+    if (messageRoot) {
+      const text = messageRoot.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      if (text) return text;
+    }
+
+    // Fallback untuk Feed/Reels: caption dapat berada langsung di overlay
+    // tanpa wrapper article, seperti div dir="auto" pada Facebook Reels.
+    const post = document.querySelector('[role="article"], article');
+    const scope = post || document;
+    const candidates = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
+          .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+          .filter((text) => text.length >= 20)
+          .filter((text) => !/Missing context|third-party fact-checkers|See why/i.test(text))
+          .filter((text) => !/^(Like|Suka|Comment|Komentar|Share|Bagikan|Follow|Ikuti|See more|See less|Lihat selengkapnya)$/i.test(text));
+    return candidates.sort((a, b) => b.length - a.length)[0] ?? '';
+  };
+  const extractThreadsCaption = () => {
+    const post = document.querySelector('[role="article"], article');
+    const scope = post || document;
+    const candidates = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
+      .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+      .filter((text) => text.length >= 20)
+      .filter((text) => !/^(Translate|Follow|Following|Reply|Like|Repost|Share|See translation|Log in|Sign up)/i.test(text))
+      .filter((text) => !/third-party fact-check|missing context/i.test(text));
+    // Pada halaman Thread, caption muncul lebih dulu sebelum daftar komentar.
+    return candidates[0] ?? '';
   };
   const steps = [{
     key: 'visit_url', label: `Membaca ${location.hostname.replace(/^www\./, '')}`, status: 'success',
@@ -64,6 +127,12 @@ function extractArticleFromActivePage() {
   } else if (isTwitter) {
     rawText = extractTwitterCaption();
     if (rawText) steps.push({ key: 'extract_content', label: 'Caption X berhasil ditemukan', status: 'success' });
+  } else if (isFacebook) {
+    rawText = extractFacebookCaption();
+    if (rawText) steps.push({ key: 'extract_content', label: 'Caption Facebook berhasil ditemukan', status: 'success' });
+  } else if (isThreads) {
+    rawText = extractThreadsCaption();
+    if (rawText) steps.push({ key: 'extract_content', label: 'Caption Threads berhasil ditemukan', status: 'success' });
   } else {
     const root = document.querySelector('article, main, [role="main"]') || document.body;
     const clone = root.cloneNode(true) as HTMLElement;
@@ -74,9 +143,9 @@ function extractArticleFromActivePage() {
     rawText = paragraphs.length ? paragraphs.join(' ') : (clone.textContent ?? '');
   }
   const content = trimLead(removeNoise(rawText)).slice(0, 10000);
-  const minimumLength = isInstagram || isTwitter ? 20 : 300;
+  const minimumLength = isInstagram || isTwitter || isFacebook || isThreads ? 20 : 300;
   if (content.length < minimumLength) {
-    const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : '';
+    const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : isFacebook ? 'Facebook' : isThreads ? 'Threads' : '';
     steps.push({ key: 'extract_content', label: platform ? `Caption ${platform} tidak ditemukan atau terlalu singkat` : 'Konten artikel terlalu singkat', status: 'fail' });
     return { success: false, error: platform ? `Caption ${platform} tidak ditemukan. Silakan gunakan mode Manual.` : 'Artikel terlalu singkat untuk diperiksa otomatis. Silakan gunakan mode Manual.', steps };
   }
@@ -208,7 +277,18 @@ export default defineBackground(() => {
         }
         try {
           await browser.storage.local.remove('lastAutoResult');
-          return await inspectAutoPage(sender.tab.id, sender.tab.url ?? '');
+          const pageUrl = sender.tab.url ?? '';
+          const isFacebookPage = /(^|\.)facebook\.com/i.test(new URL(pageUrl).hostname);
+          let latestResult;
+
+          // Facebook/Reels sering merender caption beberapa detik setelah video muncul.
+          // Coba sekarang, lalu ulangi tiap 5 detik maksimal 6 kali (30 detik).
+          for (let attempt = 0; attempt < (isFacebookPage ? 6 : 1); attempt += 1) {
+            latestResult = await inspectAutoPage(sender.tab.id, pageUrl);
+            if (latestResult.success || !isFacebookPage || attempt === 5) return latestResult;
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          }
+          return latestResult ?? { success: false, skipped: true };
         } catch {
           // Tidak mengganggu halaman pengguna bila URL bukan artikel atau tidak dapat diekstrak.
           return { success: false, skipped: true };
