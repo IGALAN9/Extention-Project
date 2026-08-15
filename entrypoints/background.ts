@@ -33,6 +33,7 @@ function extractArticleFromActivePage() {
   const isTwitter = /(^|\.)(x|twitter)\.com$/i.test(location.hostname);
   const isFacebook = /(^|\.)facebook\.com$/i.test(location.hostname);
   const isThreads = /(^|\.)(threads\.net|threads\.com)$/i.test(location.hostname);
+  const isTurnbackhoax = /(^|\.)turnbackhoax\.id$/i.test(location.hostname);
   const extractInstagramCaption = () => {
     const article = document.querySelector('article');
     const candidates = article
@@ -113,6 +114,19 @@ function extractArticleFromActivePage() {
     // Pada halaman Thread, caption muncul lebih dulu sebelum daftar komentar.
     return candidates[0] ?? '';
   };
+  const extractTurnbackhoaxQuotes = () => {
+    const quoteBlocks = Array.from(document.querySelectorAll('.quoted, blockquote'));
+    const quotes: string[] = [];
+    for (const block of quoteBlocks) {
+      const text = block.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      const matches = text.matchAll(/[“"]([^”"]+)[”"]/g);
+      for (const match of matches) {
+        const quote = match[1].trim();
+        if (quote.length >= 20 && !quotes.includes(quote)) quotes.push(quote);
+      }
+    }
+    return quotes.join('\n\n');
+  };
   const steps = [{
     key: 'visit_url', label: `Membaca ${location.hostname.replace(/^www\./, '')}`, status: 'success',
   }];
@@ -133,6 +147,9 @@ function extractArticleFromActivePage() {
   } else if (isThreads) {
     rawText = extractThreadsCaption();
     if (rawText) steps.push({ key: 'extract_content', label: 'Caption Threads berhasil ditemukan', status: 'success' });
+  } else if (isTurnbackhoax) {
+    rawText = extractTurnbackhoaxQuotes();
+    if (rawText) steps.push({ key: 'extract_content', label: 'Teks dalam quote Turnbackhoax berhasil ditemukan', status: 'success' });
   } else {
     const root = document.querySelector('article, main, [role="main"]') || document.body;
     const clone = root.cloneNode(true) as HTMLElement;
@@ -143,9 +160,9 @@ function extractArticleFromActivePage() {
     rawText = paragraphs.length ? paragraphs.join(' ') : (clone.textContent ?? '');
   }
   const content = trimLead(removeNoise(rawText)).slice(0, 10000);
-  const minimumLength = isInstagram || isTwitter || isFacebook || isThreads ? 20 : 300;
+  const minimumLength = isInstagram || isTwitter || isFacebook || isThreads || isTurnbackhoax ? 20 : 300;
   if (content.length < minimumLength) {
-    const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : isFacebook ? 'Facebook' : isThreads ? 'Threads' : '';
+    const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : isFacebook ? 'Facebook' : isThreads ? 'Threads' : isTurnbackhoax ? 'Turnbackhoax' : '';
     steps.push({ key: 'extract_content', label: platform ? `Caption ${platform} tidak ditemukan atau terlalu singkat` : 'Konten artikel terlalu singkat', status: 'fail' });
     return { success: false, error: platform ? `Caption ${platform} tidak ditemukan. Silakan gunakan mode Manual.` : 'Artikel terlalu singkat untuk diperiksa otomatis. Silakan gunakan mode Manual.', steps };
   }
