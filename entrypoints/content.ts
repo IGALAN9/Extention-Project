@@ -122,6 +122,40 @@ export default defineContentScript({
           browser.runtime.sendMessage({ type: 'CHECK_AUTO_FROM_PAGE' }).catch(() => undefined);
         }, 700);
       };
+      // Banyak media sosial berpindah post memakai history.pushState tanpa
+      // reload halaman. Pantau URL secara ringan agar post/halaman baru tetap
+      // memulai pemeriksaan Auto dan hasil URL sebelumnya dibersihkan.
+      let lastObservedUrl = location.href;
+      const detectUrlChange = () => {
+        if (location.href === lastObservedUrl) return;
+        lastObservedUrl = location.href;
+        browser.storage.local.get(['extensionEnabled', 'selectedMode']).then((state) => {
+          if (state.extensionEnabled === false || state.selectedMode === 'manual') return;
+          requestAutoCheck();
+        });
+      };
+      window.addEventListener('popstate', detectUrlChange);
+      window.addEventListener('hashchange', detectUrlChange);
+      window.setInterval(detectUrlChange, 700);
+      // Facebook memakai infinite scroll: URL tetap sama, tetapi post yang
+      // sedang terlihat berubah. Jalankan ulang pemeriksaan setelah scroll
+      // berhenti sebentar agar caption post baru menggantikan hasil lama.
+      if (/(^|\.)facebook\.com$/i.test(location.hostname)
+        || /(^|\.)(x|twitter)\.com$/i.test(location.hostname)
+        || /(^|\.)(threads\.net|threads\.com)$/i.test(location.hostname)
+        || /(^|\.)instagram\.com$/i.test(location.hostname)
+        || /(^|\.)reddit\.com$/i.test(location.hostname)) {
+        let scrollTimer = 0;
+        ctx.addEventListener(window, 'scroll', () => {
+          window.clearTimeout(scrollTimer);
+          scrollTimer = window.setTimeout(() => {
+            browser.storage.local.get(['extensionEnabled', 'selectedMode']).then((state) => {
+              if (state.extensionEnabled === false || state.selectedMode === 'manual') return;
+              requestAutoCheck();
+            });
+          }, 1200);
+        }, { passive: true });
+      }
       if (document.readyState === 'complete') requestAutoCheck();
       else window.addEventListener('load', requestAutoCheck, { once: true });
     });

@@ -88,6 +88,7 @@ function Popup() {
     if (!isEnabled) return;
     setAutoState('loading');
     setAutoError('');
+    await browser.storage.local.set({ autoChecking: true });
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error('Tab aktif tidak ditemukan.');
@@ -98,14 +99,17 @@ function Popup() {
     } catch (error) {
       setAutoError(error instanceof Error ? error.message : 'Gagal memeriksa artikel.');
       setAutoState('error');
+    } finally {
+      await browser.storage.local.set({ autoChecking: false });
     }
   };
 
   useEffect(() => {
-    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled', 'selectedMode']).then((stored) => {
+    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled', 'selectedMode', 'autoChecking']).then((stored) => {
       if (stored.lastResult) setResult(stored.lastResult as LastResult);
       if (stored.lastAutoResult) setAutoResult(stored.lastAutoResult as LastResult);
       if (typeof stored.extensionEnabled === 'boolean') setIsEnabled(stored.extensionEnabled);
+      if (stored.autoChecking === true) setAutoState('loading');
       if (stored.selectedMode === 'auto' || stored.selectedMode === 'manual') setMode(stored.selectedMode);
       else browser.storage.local.set({ selectedMode: 'auto' });
     });
@@ -118,6 +122,9 @@ function Popup() {
     const handleStorageChange = (changes: Record<string, { newValue?: unknown }>, areaName: string) => {
       if (areaName === 'local' && changes.lastAutoResult) {
         setAutoResult((changes.lastAutoResult.newValue as LastResult | undefined) ?? null);
+      }
+      if (areaName === 'local' && changes.autoChecking) {
+        setAutoState(changes.autoChecking.newValue === true ? 'loading' : 'idle');
       }
     };
     browser.storage.onChanged.addListener(handleStorageChange);
@@ -165,7 +172,7 @@ function Popup() {
           <section className="auto-content" aria-live="polite">
             <div className={`article-card ${autoResult ? 'has-result' : ''}`}>
               <p>
-                {autoState === 'loading' ? 'Sedang membaca dan membersihkan artikel pada halaman ini...'
+                {autoState === 'loading' ? 'Sedang mengecek website...'
                   : autoResult ? autoResult.text
                     : autoError || 'Tekan tombol di bawah untuk mengekstrak artikel dari halaman ini secara otomatis.'}
               </p>
@@ -193,7 +200,7 @@ function Popup() {
               </>
             )}
             <button className="auto-action" type="button" disabled={autoState === 'loading'} onClick={runAutoCheck}>
-              {autoState === 'loading' ? 'Menganalisis artikel...' : 'Periksa halaman ini'}
+              {autoState === 'loading' ? 'Sedang mengecek website...' : 'Periksa halaman ini'}
             </button>
           </section>
         )
