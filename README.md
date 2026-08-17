@@ -17,11 +17,11 @@ Project ini masih dalam tahap pengembangan aktif.
 
 **Belum**
 <br>
-- [ ] Automatic text reading (scan otomatis tanpa perlu highlight manual)
-- [ ] Integrasi Facebook
-- [ ] Integrasi X (Twitter)
-- [ ] Integrasi Threads
-- [ ] Text scraping (ambil teks dari struktur halaman platform tersebut)
+- [x] Automatic text reading (scan otomatis tanpa perlu highlight manual)
+- [x] Integrasi Facebook
+- [x] Integrasi X (Twitter)
+- [x] Integrasi Threads
+- [x] Text scraping (ambil teks dari struktur halaman platform tersebut)
 
 ## Tech Stack
  
