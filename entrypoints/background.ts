@@ -301,10 +301,31 @@ export default defineBackground(() => {
       });
       const payload = await res.json();
       if (!res.ok) throw new Error(payload.detail || 'Gagal menjalankan penjelasan XAI.');
+      const isFake = payload.label === 'HOAKS';
+      const directionalWords: Array<{ word: string; score: number }> = [];
+      const seenWords = new Set<string>();
+
+      // Skor positif mendukung kelas Hoaks, sedangkan skor negatif mendukung
+      // kelas Fakta. Tampilkan hanya kata yang searah dengan hasil prediksi.
+      const supportingScores = (Array.isArray(payload.word_scores) ? payload.word_scores : [])
+        .filter((item: { word?: unknown; score?: unknown }) => (
+          typeof item.word === 'string'
+          && typeof item.score === 'number'
+          && (isFake ? item.score > 0 : item.score < 0)
+        ))
+        .sort((a: { score: number }, b: { score: number }) => Math.abs(b.score) - Math.abs(a.score));
+
+      for (const item of supportingScores) {
+        const normalizedWord = item.word.trim().toLocaleLowerCase('id-ID');
+        if (!normalizedWord || seenWords.has(normalizedWord)) continue;
+        seenWords.add(normalizedWord);
+        directionalWords.push({ word: item.word.trim(), score: item.score });
+        if (directionalWords.length === 5) break;
+      }
       return {
         ...payload,
-        is_fake: payload.label === 'HOAKS',
-        influentialWords: payload.word_scores.slice(0, 5),
+        is_fake: isFake,
+        influentialWords: directionalWords,
         model_scores: { bilstm: 0, gru: 0, cnn_bilstm: 0 },
       };
     };
