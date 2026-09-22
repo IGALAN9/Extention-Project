@@ -30,6 +30,7 @@ interface LastResult {
 type Mode = 'auto' | 'manual';
 type ApiStatus = 'checking' | 'online' | 'offline';
 type AutoState = 'idle' | 'loading' | 'error';
+type AutoProgress = { percent: number; label: string };
 
 /** Bagian hasil yang dipakai oleh mode Manual dan Auto. */
 function ResultDetails({ result }: { result: LastResult }) {
@@ -43,11 +44,15 @@ function ResultDetails({ result }: { result: LastResult }) {
       <div className="keyword-label">5 Kata Berpengaruh:</div>
       <div className="keywords" aria-label="Lima kata paling berpengaruh">
         {result.data.influentialWords?.length ? (
-          result.data.influentialWords.map(({ word, score }) => (
-            <span className={isFake ? 'negative' : 'positive'} key={word} title={`Skor pengaruh XAI: ${score}`}>
-              {word}
-            </span>
-          ))
+          result.data.influentialWords.map(({ word, score }) => {
+            const direction = score < 0 ? 'positive' : score > 0 ? 'negative' : 'neutral';
+            const directionLabel = score < 0 ? 'mengarah Fakta' : score > 0 ? 'mengarah Hoaks' : 'netral';
+            return (
+              <span className={direction} key={`${word}-${score}`} title={`Skor XAI: ${score} (${directionLabel})`}>
+                {word}
+              </span>
+            );
+          })
         ) : (
           <span className="unavailable">Penjelasan belum tersedia</span>
         )}
@@ -74,6 +79,7 @@ function Popup() {
   const [isEnabled, setIsEnabled] = useState(true);
   const [apiStatus, setApiStatus] = useState<ApiStatus>('checking');
   const [autoState, setAutoState] = useState<AutoState>('idle');
+  const [autoProgress, setAutoProgress] = useState<AutoProgress>({ percent: 0, label: '' });
   const [autoError, setAutoError] = useState('');
 
   const checkApiStatus = () => {
@@ -87,8 +93,12 @@ function Popup() {
   const runAutoCheck = async () => {
     if (!isEnabled) return;
     setAutoState('loading');
+    setAutoProgress({ percent: 10, label: 'Menyiapkan pemeriksaan...' });
     setAutoError('');
-    await browser.storage.local.set({ autoChecking: true });
+    await browser.storage.local.set({
+      autoChecking: true,
+      autoProgress: { percent: 10, label: 'Menyiapkan pemeriksaan...' },
+    });
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error('Tab aktif tidak ditemukan.');
@@ -105,11 +115,12 @@ function Popup() {
   };
 
   useEffect(() => {
-    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled', 'selectedMode', 'autoChecking']).then((stored) => {
+    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled', 'selectedMode', 'autoChecking', 'autoProgress']).then((stored) => {
       if (stored.lastResult) setResult(stored.lastResult as LastResult);
       if (stored.lastAutoResult) setAutoResult(stored.lastAutoResult as LastResult);
       if (typeof stored.extensionEnabled === 'boolean') setIsEnabled(stored.extensionEnabled);
       if (stored.autoChecking === true) setAutoState('loading');
+      if (stored.autoProgress) setAutoProgress(stored.autoProgress as AutoProgress);
       if (stored.selectedMode === 'auto' || stored.selectedMode === 'manual') setMode(stored.selectedMode);
       else browser.storage.local.set({ selectedMode: 'auto' });
     });
@@ -125,6 +136,9 @@ function Popup() {
       }
       if (areaName === 'local' && changes.autoChecking) {
         setAutoState(changes.autoChecking.newValue === true ? 'loading' : 'idle');
+      }
+      if (areaName === 'local' && changes.autoProgress?.newValue) {
+        setAutoProgress(changes.autoProgress.newValue as AutoProgress);
       }
     };
     browser.storage.onChanged.addListener(handleStorageChange);
@@ -177,6 +191,24 @@ function Popup() {
                     : autoError || 'Tekan tombol di bawah untuk mengekstrak artikel dari halaman ini secara otomatis.'}
               </p>
             </div>
+            {autoState === 'loading' && (
+              <div className="auto-progress" aria-live="polite">
+                <div className="auto-progress__label">
+                  <span>{autoProgress.label || 'Sedang mengecek website...'}</span>
+                  <strong>{Math.round(autoProgress.percent)}%</strong>
+                </div>
+                <div
+                  className="auto-progress__track"
+                  role="progressbar"
+                  aria-label="Proses pemeriksaan website"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(autoProgress.percent)}
+                >
+                  <span style={{ width: `${Math.max(4, Math.min(100, autoProgress.percent))}%` }} />
+                </div>
+              </div>
+            )}
             {autoResult && (
               <>
                 <ResultDetails result={autoResult} />
