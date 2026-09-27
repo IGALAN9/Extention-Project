@@ -180,38 +180,44 @@ function extractArticleFromActivePage() {
       else overlay.remove();
     }
 
-    // Caption post Facebook biasanya berada di container ini, termasuk post video.
-    const messageRoots = Array.from(document.querySelectorAll(
-      '[data-ad-comet-preview="message"], [data-testid="post_message"]',
+    // Photo Viewer menaruh caption dan komentar di panel kanan yang sama.
+    // Cari dialog yang terlihat, lalu nilai tiap blok teks secara terpisah
+    // supaya seluruh panel atau komentar tidak dianggap sebagai caption.
+    const dialog = mostVisible(Array.from(document.querySelectorAll('[role="dialog"]')));
+    const scope: Element | Document = dialog || document;
+    const messageRoots = Array.from(scope.querySelectorAll(
+      '[data-ad-comet-preview="message"], [data-ad-preview="message"], [data-testid="post_message"]',
     ));
-    // Feed Facebook mempertahankan post lama di DOM saat pengguna scroll.
-    // Pilih caption dengan area paling besar di viewport, bukan elemen pertama.
-    const visibleMessageRoots = messageRoots
+    const leafAutoNodes = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
+      .filter((node) => !node.querySelector('div[dir="auto"], span[dir="auto"]'));
+    const candidateNodes = Array.from(new Set([...messageRoots, ...leafAutoNodes]));
+    const seenTexts = new Set<string>();
+    const candidates = candidateNodes
       .map((node) => {
+        const text = node.textContent?.replace(/\s+/g, ' ').trim() ?? '';
         const rect = node.getBoundingClientRect();
-        const visibleTop = Math.max(rect.top, 0);
-        const visibleBottom = Math.min(rect.bottom, window.innerHeight);
-        const visibleArea = Math.max(0, visibleBottom - visibleTop) * Math.max(0, rect.width);
-        return { node, visibleArea };
-      })
-      .filter(({ visibleArea }) => visibleArea > 0)
-      .sort((a, b) => b.visibleArea - a.visibleArea);
-    const messageRoot = visibleMessageRoots[0]?.node ?? messageRoots[0];
-    if (messageRoot) {
-      const text = messageRoot.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-      if (text) return text;
-    }
+        const visible = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0;
+        const normalized = text.toLocaleLowerCase('id-ID');
+        if (!visible || text.length < 20 || seenTexts.has(normalized)) return null;
+        seenTexts.add(normalized);
+        if (/Missing context|third-party fact-checkers|See why/i.test(text)) return null;
+        if (/^(Like|Suka|Comment|Komentar|Share|Bagikan|Follow|Ikuti|See more|See less|Lihat selengkapnya)$/i.test(text)) return null;
+        // Container gabungan panel kanan biasanya memuat kontrol komentar ini.
+        if (/Paling relevan|Most relevant|Komentari sebagai|Write a comment|Lihat \d+ balasan|View \d+ repl/i.test(text)) return null;
 
-    // Fallback untuk Feed/Reels: caption dapat berada langsung di overlay
-    // tanpa wrapper article, seperti div dir="auto" pada Facebook Reels.
-    const post = document.querySelector('[role="article"], article');
-    const scope = post || document;
-    const candidates = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
-          .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
-          .filter((text) => text.length >= 20)
-          .filter((text) => !/Missing context|third-party fact-checkers|See why/i.test(text))
-          .filter((text) => !/^(Like|Suka|Comment|Komentar|Share|Bagikan|Follow|Ikuti|See more|See less|Lihat selengkapnya)$/i.test(text));
-    return candidates.sort((a, b) => b.length - a.length)[0] ?? '';
+        const commentArea = node.closest(
+          '[aria-label*="comment" i], [aria-label*="komentar" i], [data-testid*="comment" i]',
+        );
+        const topBonus = rect.top < window.innerHeight * 0.55 ? 1200 : 0;
+        const commentPenalty = commentArea && text.length < 120 ? 2600 : 0;
+        const messageBonus = messageRoots.includes(node) && text.length >= 80 ? 600 : 0;
+        const score = Math.min(text.length, 1500) * 5 + topBonus + messageBonus
+          - Math.max(rect.top, 0) * 0.35 - commentPenalty;
+        return { text, score };
+      })
+      .filter((item): item is { text: string; score: number } => item !== null)
+      .sort((a, b) => b.score - a.score);
+    return candidates[0]?.text ?? '';
   };
   const extractThreadsCaption = () => {
     const post = mostVisible(Array.from(document.querySelectorAll('[role="article"], article')))
