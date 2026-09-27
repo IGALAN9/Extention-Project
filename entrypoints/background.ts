@@ -4,6 +4,9 @@
  */
 function extractArticleFromActivePage() {
   const removeNoise = (text: string) => text
+    // Dateline Kompas muncul langsung di paragraf pertama, terpisah dari
+    // variabel keywordBrandSafety yang berada di dalam <script>.
+    .replace(/^\s*[A-ZÀ-ÖØ-Ý][A-ZÀ-ÖØ-Ý\s.'’-]{1,60},\s*KOMPAS\.com\s*(?:[–—-]|&ndash;)?\s*/i, '')
     .replace(/ADVERTISEMENT/gi, '')
     .replace(/Scroll ke bawah untuk melanjutkan membaca/gi, '')
     .replace(/SCROLL TO CONTINUE(?: WITH CONTENT)?/gi, '')
@@ -41,12 +44,30 @@ function extractArticleFromActivePage() {
     }
     return text;
   };
+  /** Hapus dateline/redaksi pada awal artikel, bukan isi beritanya. */
+  const stripNewsDateline = (text: string) => text
+    // Contoh: "TOKYO, KOMPAS.com –" dan "Jakarta, CNN Indonesia --".
+    .replace(
+      /^[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ.'\s-]{1,45},\s*(?:KOMPAS\.com|CNN Indonesia|ANTARA(?: News)?|TRIBUNNEWS\.COM|VIVA(?:\.co\.id)?|Suara\.com|SINDOnews|TVRInews)\s*(?:--|[-–—])\s*/i,
+      '',
+    )
+    // Contoh: "Liputan6.com, Bandung -" atau nama media diikuti kota.
+    .replace(
+      /^(?:Liputan6\.com|KOMPAS\.com|CNN Indonesia|detikcom|ANTARA(?: News)?|TRIBUNNEWS\.COM|VIVA(?:\.co\.id)?|Suara\.com|SINDOnews|TVRInews)(?:,\s*[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ.'\s-]{1,45})?\s*(?:--|[-–—])\s*/i,
+      '',
+    )
+    // Contoh: "Jakarta (ANTARA) -".
+    .replace(/^[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ.'\s-]{1,45}\s+\((?:ANTARA|Reuters|AFP|AP)\)\s*(?:--|[-–—])\s*/i, '')
+    // Kode reporter/redaktur seperti (thr/isn) atau (naf/naf).
+    .replace(/\s*\([a-z]{2,5}(?:\/[a-z]{2,5})+\)\s*$/, '')
+    .trim();
   const isInstagram = /(^|\.)instagram\.com$/i.test(location.hostname);
   const isTwitter = /(^|\.)(x|twitter)\.com$/i.test(location.hostname);
   const isFacebook = /(^|\.)facebook\.com$/i.test(location.hostname);
   const isThreads = /(^|\.)(threads\.net|threads\.com)$/i.test(location.hostname);
   const isReddit = /(^|\.)reddit\.com$/i.test(location.hostname);
   const isTurnbackhoax = /(^|\.)turnbackhoax\.id$/i.test(location.hostname);
+  const isLiputan6 = /(^|\.)liputan6\.com$/i.test(location.hostname);
   const mostVisible = <T extends Element>(nodes: T[]) => nodes
     .map((node) => {
       const rect = node.getBoundingClientRect();
@@ -61,6 +82,49 @@ function extractArticleFromActivePage() {
     'detik.com', 'detik.net', 'liputan6.com', 'cnnindonesia.com',
     'kompas.com', 'tempo.co', 'antaranews.com', 'tirto.id', 'kumparan.com',
   ].some((domain) => location.hostname === domain || location.hostname.endsWith(`.${domain}`));
+  /**
+   * Cari container isi artikel secara universal. Selector semantik yang paling
+   * spesifik diprioritaskan; jika tidak tersedia, pilih article/main dengan
+   * kepadatan paragraf tinggi dan kepadatan link rendah.
+   */
+  const findArticleRoot = () => {
+    const preferredSelectors = [
+      '#article-content-body', '[itemprop="articleBody"]', '[data-testid="article-body"]',
+      '[data-component="article-body"]', '[data-component-name*="article-content"]',
+      '.detail__body-text', '.article-content', '.article-body', '.article__body',
+      '.article__content', '.entry-content', '.post-content', '.story-body',
+      '.story__body', '.news-content', '.read__content-body', '.read__content',
+      '.itp_bodycontent', '[class*="bodycontent"]',
+      '[class*="article-content"]', '[class*="article_body"]', '[class*="article-body"]',
+    ];
+    const paragraphLength = (node: Element) => Array.from(node.querySelectorAll('p'))
+      .reduce((total, paragraph) => total + (paragraph.textContent?.trim().length ?? 0), 0);
+
+    for (const selector of preferredSelectors) {
+      const candidate = Array.from(document.querySelectorAll(selector))
+        .map((node) => ({ node, length: paragraphLength(node) }))
+        .filter(({ length }) => length >= 150)
+        .sort((a, b) => b.length - a.length)[0]?.node;
+      if (candidate) return candidate;
+    }
+
+    return Array.from(document.querySelectorAll('article, main, [role="main"]'))
+      .map((node) => {
+        const text = node.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+        const paragraphs = node.querySelectorAll('p');
+        const paragraphChars = paragraphLength(node);
+        const linkChars = Array.from(node.querySelectorAll('a'))
+          .reduce((total, link) => total + (link.textContent?.trim().length ?? 0), 0);
+        const identity = `${node.id} ${node.className}`;
+        const semanticBonus = node.tagName === 'ARTICLE' || /article|story|content|detail|post/i.test(identity) ? 1500 : 0;
+        const noisePenalty = /related|recommend|comment|sidebar|footer|header|menu|popular|terpopuler|latest/i.test(identity) ? 4000 : 0;
+        const linkDensity = text.length ? Math.min(linkChars / text.length, 0.95) : 1;
+        const score = paragraphChars * (1 - linkDensity) + paragraphs.length * 80 + semanticBonus - noisePenalty;
+        return { node, score, paragraphChars };
+      })
+      .filter(({ paragraphChars }) => paragraphChars >= 150)
+      .sort((a, b) => b.score - a.score)[0]?.node ?? document.body;
+  };
   const extractInstagramCaption = () => {
     const article = mostVisible(Array.from(document.querySelectorAll('article'))) || document.querySelector('article');
     const candidates = article
@@ -116,38 +180,44 @@ function extractArticleFromActivePage() {
       else overlay.remove();
     }
 
-    // Caption post Facebook biasanya berada di container ini, termasuk post video.
-    const messageRoots = Array.from(document.querySelectorAll(
-      '[data-ad-comet-preview="message"], [data-testid="post_message"]',
+    // Photo Viewer menaruh caption dan komentar di panel kanan yang sama.
+    // Cari dialog yang terlihat, lalu nilai tiap blok teks secara terpisah
+    // supaya seluruh panel atau komentar tidak dianggap sebagai caption.
+    const dialog = mostVisible(Array.from(document.querySelectorAll('[role="dialog"]')));
+    const scope: Element | Document = dialog || document;
+    const messageRoots = Array.from(scope.querySelectorAll(
+      '[data-ad-comet-preview="message"], [data-ad-preview="message"], [data-testid="post_message"]',
     ));
-    // Feed Facebook mempertahankan post lama di DOM saat pengguna scroll.
-    // Pilih caption dengan area paling besar di viewport, bukan elemen pertama.
-    const visibleMessageRoots = messageRoots
+    const leafAutoNodes = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
+      .filter((node) => !node.querySelector('div[dir="auto"], span[dir="auto"]'));
+    const candidateNodes = Array.from(new Set([...messageRoots, ...leafAutoNodes]));
+    const seenTexts = new Set<string>();
+    const candidates = candidateNodes
       .map((node) => {
+        const text = node.textContent?.replace(/\s+/g, ' ').trim() ?? '';
         const rect = node.getBoundingClientRect();
-        const visibleTop = Math.max(rect.top, 0);
-        const visibleBottom = Math.min(rect.bottom, window.innerHeight);
-        const visibleArea = Math.max(0, visibleBottom - visibleTop) * Math.max(0, rect.width);
-        return { node, visibleArea };
-      })
-      .filter(({ visibleArea }) => visibleArea > 0)
-      .sort((a, b) => b.visibleArea - a.visibleArea);
-    const messageRoot = visibleMessageRoots[0]?.node ?? messageRoots[0];
-    if (messageRoot) {
-      const text = messageRoot.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-      if (text) return text;
-    }
+        const visible = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0;
+        const normalized = text.toLocaleLowerCase('id-ID');
+        if (!visible || text.length < 20 || seenTexts.has(normalized)) return null;
+        seenTexts.add(normalized);
+        if (/Missing context|third-party fact-checkers|See why/i.test(text)) return null;
+        if (/^(Like|Suka|Comment|Komentar|Share|Bagikan|Follow|Ikuti|See more|See less|Lihat selengkapnya)$/i.test(text)) return null;
+        // Container gabungan panel kanan biasanya memuat kontrol komentar ini.
+        if (/Paling relevan|Most relevant|Komentari sebagai|Write a comment|Lihat \d+ balasan|View \d+ repl/i.test(text)) return null;
 
-    // Fallback untuk Feed/Reels: caption dapat berada langsung di overlay
-    // tanpa wrapper article, seperti div dir="auto" pada Facebook Reels.
-    const post = document.querySelector('[role="article"], article');
-    const scope = post || document;
-    const candidates = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
-          .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
-          .filter((text) => text.length >= 20)
-          .filter((text) => !/Missing context|third-party fact-checkers|See why/i.test(text))
-          .filter((text) => !/^(Like|Suka|Comment|Komentar|Share|Bagikan|Follow|Ikuti|See more|See less|Lihat selengkapnya)$/i.test(text));
-    return candidates.sort((a, b) => b.length - a.length)[0] ?? '';
+        const commentArea = node.closest(
+          '[aria-label*="comment" i], [aria-label*="komentar" i], [data-testid*="comment" i]',
+        );
+        const topBonus = rect.top < window.innerHeight * 0.55 ? 1200 : 0;
+        const commentPenalty = commentArea && text.length < 120 ? 2600 : 0;
+        const messageBonus = messageRoots.includes(node) && text.length >= 80 ? 600 : 0;
+        const score = Math.min(text.length, 1500) * 5 + topBonus + messageBonus
+          - Math.max(rect.top, 0) * 0.35 - commentPenalty;
+        return { text, score };
+      })
+      .filter((item): item is { text: string; score: number } => item !== null)
+      .sort((a, b) => b.score - a.score);
+    return candidates[0]?.text ?? '';
   };
   const extractThreadsCaption = () => {
     const post = mostVisible(Array.from(document.querySelectorAll('[role="article"], article')))
@@ -201,10 +271,8 @@ function extractArticleFromActivePage() {
     // Prioritaskan container isi artikel agar sidebar, rekomendasi, dan navigasi
     // Kompas tidak ikut terbaca saat fallback ke main.
     const root = isReddit
-      ? (mostVisible(Array.from(document.querySelectorAll('article'))) || document.querySelector('article'))
-      : document.querySelector(
-        '.read__content, .read__content-body, .article-content, [class*="read__content"], article, main, [role="main"]',
-      );
+      ? (mostVisible(Array.from(document.querySelectorAll('article'))) || findArticleRoot())
+      : findArticleRoot();
     const safeRoot = root || document.body;
     const clone = safeRoot.cloneNode(true) as HTMLElement;
     const removableSelectors = [
@@ -215,11 +283,39 @@ function extractArticleFromActivePage() {
       // container artikel, sehingga tidak cukup hanya menghapus elemen <form>.
       '.comment-section', '.comment-form', '.comments', '.comment-area',
       '[class*="comment"]', '[id*="comment"]',
+      // Noise yang berada di dalam #article-content-body CNN Indonesia.
+      '.topiksisip', '.paradetail', '[class*="paradetail"]', '.ads-slot',
+      '[data-target*="detail/embed"]',
+      // Noise umum di dalam container artikel berbagai portal berita.
+      '[class*="breadcrumb"]', '[class*="share"]', '[class*="social-share"]',
+      '[class*="newsletter"]', '[class*="subscription"]', '[class*="sidebar"]',
+      '[data-ad-type]', '[data-info="ad"]', '[class*="advertisement"]', '[id^="div-gpt-ad"]',
+      '.parallaxindetail', '.staticdetail_container', '.aevp', '[class*="pip-vid"]',
+      'social-actions', '[class*="engagement"]', '.detail__body-tag',
+      '[class*="article-tag"]', '.linksisip', '.lihatjg', '[data-itp-widget="related"]',
+      '.ads-on-body', '.ads-partner-wrap', '[class*="ads-"]', '.kompasidRec',
+      'blockquote.twitter-tweet', 'blockquote[class*="twitter"]',
+      'blockquote[class*="instagram"]', '[class*="tiktok-embed"]',
     ];
     // Situs berita tepercaya boleh mempertahankan teks link di dalam artikel.
     // Domain lain menghapus <a> agar link Baca Juga tidak ikut dianalisis.
     if (!isTrustedNewsSite) removableSelectors.push('a');
     clone.querySelectorAll(removableSelectors.join(', ')).forEach((node) => node.remove());
+    // Bila situs menyediakan penanda akhir artikel, buang semua elemen setelah
+    // penanda tersebut. Ini mencegah komentar dan rekomendasi di wrapper yang
+    // sama ikut terbaca tanpa membutuhkan selector khusus domain.
+    clone.querySelectorAll(
+      '.end-of-article, #EndOfArticle, [class*="end-of-article" i], [class*="endofarticle" i], '
+      + '[id*="end-of-article" i], [id*="endofarticle" i], [data-end-of-article]',
+    ).forEach((marker) => {
+      let sibling = marker.nextElementSibling;
+      while (sibling) {
+        const next = sibling.nextElementSibling;
+        sibling.remove();
+        sibling = next;
+      }
+      marker.remove();
+    });
     // Detik dan situs berita lain kadang menaruh related link sebagai <strong>
     // tanpa class khusus, misalnya "Lihat juga Video: ...".
     clone.querySelectorAll('strong').forEach((node) => {
@@ -233,6 +329,9 @@ function extractArticleFromActivePage() {
       '.read_others', '[class*="read_others"]', '[class*="baca-juga"]', '[class*="baca_juga"]',
       '.related-news', '.relateds-slow', '[class*="related-news"]', '[class*="relateds"]',
       '[data-component*="related"]', '.recommendation', '.rekomendasi', '[class*="rekomendasi"]',
+      '[data-component-name*="related"]', '[data-component-name*="recommend"]',
+      '[class*="read-page--related"]', '[class*="article-tags"]', '[class*="tag-list"]',
+      '[class*="topic-list"]', '[class*="latest-news"]',
     ].join(', ');
     clone.querySelectorAll(relatedSelectors).forEach((node) => node.remove());
     // Hapus metadata header SINDOnews yang kadang dibungkus sebagai satu
@@ -265,8 +364,23 @@ function extractArticleFromActivePage() {
       .map((node) => node.textContent?.trim() ?? '')
       .filter((text) => text.length > 25);
     rawText = paragraphs.length ? paragraphs.join(' ') : (clone.textContent ?? '');
+    if (isLiputan6) {
+      // Widget lanjutan Liputan6 kadang masih berada di dalam container isi
+      // artikel tanpa class stabil. Potong teks pada penanda akhir artikel.
+      const tailMarkers = [
+        /\bIkuti berita\b/i,
+        /\bArtikel Terkait\b/i,
+        /\bTopik Terkait\b/i,
+        /\bBerita Terkini\b/i,
+      ];
+      const cutoff = tailMarkers.reduce((earliest, pattern) => {
+        const index = rawText.search(pattern);
+        return index >= 250 && index < earliest ? index : earliest;
+      }, rawText.length);
+      rawText = rawText.slice(0, cutoff).trim();
+    }
   }
-  const content = trimLead(removeNoise(rawText)).slice(0, 10000);
+  const content = stripNewsDateline(trimLead(removeNoise(rawText))).slice(0, 10000);
   const minimumLength = isInstagram || isTwitter || isFacebook || isThreads || isReddit || isTurnbackhoax ? 20 : 300;
   if (content.length < minimumLength) {
     const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : isFacebook ? 'Facebook' : isThreads ? 'Threads' : isReddit ? 'Reddit' : isTurnbackhoax ? 'Turnbackhoax' : '';
@@ -309,8 +423,14 @@ export default defineBackground(() => {
       };
     };
 
+    const setAutoProgress = (percent: number, label: string) => browser.storage.local.set({
+      autoProgress: { percent: Math.max(0, Math.min(100, percent)), label },
+    });
+
     /** Jalankan ekstraksi DOM dan XAI untuk satu tab; dipakai klik popup dan auto saat halaman dibuka. */
-    const inspectAutoPage = async (tabId: number, fallbackUrl = '') => {
+    const inspectAutoPage = async (tabId: number, fallbackUrl = '', attempt = 0) => {
+      const extractionProgress = Math.min(25 + attempt * 5, 50);
+      await setAutoProgress(extractionProgress, 'Membaca struktur halaman...');
       const [injection] = await browser.scripting.executeScript({
         target: { tabId },
         func: extractArticleFromActivePage,
@@ -319,7 +439,10 @@ export default defineBackground(() => {
       if (!extracted?.success || !extracted.article) {
         return { success: false, error: extracted?.error || 'Artikel tidak dapat diekstrak dari halaman ini.' };
       }
+      await setAutoProgress(55, 'Isi artikel berhasil ditemukan dan dibersihkan');
+      await setAutoProgress(72, 'Mengirim artikel ke model prediksi...');
       const data = await explainText(extracted.article.content);
+      await setAutoProgress(90, 'Menyusun hasil prediksi dan penjelasan XAI...');
       const result = {
         text: extracted.article.content,
         url: extracted.article.url ?? fallbackUrl ?? extracted.article.source,
@@ -329,6 +452,7 @@ export default defineBackground(() => {
       await browser.storage.local.set({ lastAutoResult: result });
       browser.action.setBadgeText({ text: '1' });
       browser.action.setBadgeBackgroundColor({ color: '#ff5a17' });
+      await setAutoProgress(100, 'Pemeriksaan selesai');
       return { success: true, result };
     };
 
@@ -365,7 +489,10 @@ export default defineBackground(() => {
     if (message.type === 'CHECK_AUTO_PAGE') {
       return browser.storage.local.get('extensionEnabled').then(async (stored) => {
         if (stored.extensionEnabled === false) return { success: false, error: 'Pemeriksaan extension sedang dimatikan.' };
-        await browser.storage.local.set({ autoChecking: true });
+        await browser.storage.local.set({
+          autoChecking: true,
+          autoProgress: { percent: 10, label: 'Menyiapkan pemeriksaan...' },
+        });
         try {
           await browser.storage.local.remove('lastAutoResult');
           return await inspectAutoPage(message.tabId, sender.tab?.url ?? '');
@@ -389,6 +516,10 @@ export default defineBackground(() => {
       return browser.storage.local.get(['extensionEnabled', 'selectedMode']).then(async (stored) => {
         if (stored.extensionEnabled !== false && stored.selectedMode !== 'manual') {
           await browser.storage.local.remove('lastAutoResult');
+          await browser.storage.local.set({
+            autoChecking: true,
+            autoProgress: { percent: 5, label: 'Menunggu halaman siap diperiksa...' },
+          });
           browser.action.setBadgeText({ text: '' });
         }
         return { success: true };
@@ -403,7 +534,10 @@ export default defineBackground(() => {
           return { success: false, skipped: true };
         }
         try {
-          await browser.storage.local.set({ autoChecking: true });
+          await browser.storage.local.set({
+            autoChecking: true,
+            autoProgress: { percent: 10, label: 'Menyiapkan pemeriksaan...' },
+          });
           await browser.storage.local.remove('lastAutoResult');
           const pageUrl = sender.tab.url ?? '';
           const pageHost = new URL(pageUrl).hostname;
@@ -418,8 +552,12 @@ export default defineBackground(() => {
           // beberapa detik setelah shell halaman muncul.
           // Coba sekarang, lalu ulangi tiap 5 detik maksimal 6 kali (30 detik).
           for (let attempt = 0; attempt < (isSocialPage ? 6 : 1); attempt += 1) {
-            latestResult = await inspectAutoPage(sender.tab.id, pageUrl);
+            latestResult = await inspectAutoPage(sender.tab.id, pageUrl, attempt);
             if (latestResult.success || !isSocialPage || attempt === 5) return latestResult;
+            await setAutoProgress(
+              Math.min(30 + attempt * 6, 55),
+              `Menunggu konten halaman dimuat (${attempt + 1}/6)...`,
+            );
             await new Promise((resolve) => setTimeout(resolve, 5000));
           }
           return latestResult ?? { success: false, skipped: true };
