@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import AboutPage from './AboutPage';
 import './App.css';
 
 type WordScore = { word: string; score: number };
@@ -72,6 +73,13 @@ function DisabledState() {
 }
 
 function Popup() {
+  // Navigasi About hanya mengganti tampilan; state pemeriksaan tetap hidup.
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const aboutButtonRef = useRef<HTMLButtonElement>(null);
+  const closeAbout = () => {
+    setIsAboutOpen(false);
+    requestAnimationFrame(() => aboutButtonRef.current?.focus());
+  };
   // Auto adalah mode utama saat popup pertama kali dibuka.
   const [mode, setMode] = useState<Mode>('auto');
   const [result, setResult] = useState<LastResult | null>(null);
@@ -148,7 +156,16 @@ function Popup() {
   const currentUrl = (mode === 'auto' ? autoResult?.url : result?.url) || 'WWW.EXAMPLE.COM';
 
   return (
-    <main className="popup-shell">
+    <main
+      className={`popup-shell${isAboutOpen ? ' popup-shell--about' : ''}`}
+      onKeyDown={(event) => {
+        if (isAboutOpen && event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          closeAbout();
+        }
+      }}
+    >
       {/* Sakelar global untuk mengaktifkan atau mematikan pemeriksaan. */}
       <button
         aria-label={isEnabled ? 'Matikan pemeriksaan extension' : 'Nyalakan pemeriksaan extension'}
@@ -165,6 +182,10 @@ function Popup() {
         <span aria-hidden="true">&#x23FB;</span>
       </button>
 
+      {isAboutOpen && <AboutPage onBack={closeAbout} />}
+
+      {/* Tetap terpasang saat About dibuka agar mode dan hasil tidak direset. */}
+      <div hidden={isAboutOpen}>
       <div className="url-pill" title={currentUrl}>URL: {currentUrl}</div>
 
       <div className="mode-switch" aria-label="Pilih mode pemeriksaan">
@@ -246,6 +267,23 @@ function Popup() {
       )}
 
       {mode === 'manual' && <p className="manual-hint">Mode manual aktif - pilih teks pada halaman untuk cek fakta.</p>}
+      </div>
+
+      {/* Selalu tersedia pada layar Auto/Manual, loading, error, dan nonaktif. */}
+      <button
+        ref={aboutButtonRef}
+        className="about-button"
+        type="button"
+        hidden={isAboutOpen}
+        aria-label="Tentang extension"
+        title="About Us"
+        onClick={() => setIsAboutOpen(true)}
+      >
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="12" cy="6.5" r="1.8" />
+          <path d="M10 10h3v8h2v2H9v-2h2v-6h-1z" />
+        </svg>
+      </button>
     </main>
   );
 }
