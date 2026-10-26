@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import AboutPage from './AboutPage';
+import { getAutoContentError, getManualContentError, MIN_MANUAL_CONTENT_WORDS } from '../../utils/auto-content';
 import './App.css';
 
 type WordScore = { word: string; score: number };
@@ -83,12 +84,14 @@ function Popup() {
   // Auto adalah mode utama saat popup pertama kali dibuka.
   const [mode, setMode] = useState<Mode>('auto');
   const [result, setResult] = useState<LastResult | null>(null);
+  const [manualError, setManualError] = useState('');
   const [autoResult, setAutoResult] = useState<LastResult | null>(null);
   const [isEnabled, setIsEnabled] = useState(true);
   const [apiStatus, setApiStatus] = useState<ApiStatus>('checking');
   const [autoState, setAutoState] = useState<AutoState>('idle');
   const [autoProgress, setAutoProgress] = useState<AutoProgress>({ percent: 0, label: '' });
   const [autoError, setAutoError] = useState('');
+  const [autoPageUrl, setAutoPageUrl] = useState('');
 
   const checkApiStatus = () => {
     setApiStatus('checking');
@@ -101,33 +104,45 @@ function Popup() {
   const runAutoCheck = async () => {
     if (!isEnabled) return;
     setAutoState('loading');
+    setAutoResult(null);
     setAutoProgress({ percent: 10, label: 'Menyiapkan pemeriksaan...' });
     setAutoError('');
-    await browser.storage.local.set({
-      autoChecking: true,
-      autoProgress: { percent: 10, label: 'Menyiapkan pemeriksaan...' },
-    });
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error('Tab aktif tidak ditemukan.');
-      const response = await browser.runtime.sendMessage({ type: 'CHECK_AUTO_PAGE', tabId: tab.id });
+      setAutoPageUrl(tab.url ?? '');
+      const response = await browser.runtime.sendMessage({ type: 'CHECK_AUTO_PAGE', tabId: tab.id, url: tab.url });
+      if (response?.skipped) return;
       if (!response?.success) throw new Error(response?.error || 'Gagal memeriksa artikel.');
-      setAutoResult(response.result as LastResult);
-      setAutoState('idle');
+      // Hasil dan status berasal dari storage background agar respons lama
+      // tidak menimpa pemeriksaan baru ketika URL/halaman sudah berubah.
     } catch (error) {
+      setAutoResult(null);
       setAutoError(error instanceof Error ? error.message : 'Gagal memeriksa artikel.');
       setAutoState('error');
-    } finally {
-      await browser.storage.local.set({ autoChecking: false });
     }
   };
 
   useEffect(() => {
-    browser.storage.local.get(['lastResult', 'lastAutoResult', 'extensionEnabled', 'selectedMode', 'autoChecking', 'autoProgress']).then((stored) => {
-      if (stored.lastResult) setResult(stored.lastResult as LastResult);
-      if (stored.lastAutoResult) setAutoResult(stored.lastAutoResult as LastResult);
+    browser.storage.local.get(['lastResult', 'manualError', 'lastAutoResult', 'extensionEnabled', 'selectedMode', 'autoChecking', 'autoProgress', 'autoError', 'autoPageUrl']).then((stored) => {
+      const savedManualResult = stored.lastResult as LastResult | null | undefined;
+      const savedManualError = (stored.manualError as string | undefined)
+        || (savedManualResult ? getManualContentError(savedManualResult.text) : '');
+      // Sembunyikan hasil lama yang belum memenuhi batas minimum Manual.
+      if (savedManualResult && !savedManualError) setResult(savedManualResult);
+      setManualError(savedManualError);
+      const savedAutoResult = stored.lastAutoResult as LastResult | null | undefined;
+      const savedError = (stored.autoError as string | undefined)
+        || (savedAutoResult ? getAutoContentError(savedAutoResult.text, savedAutoResult.url) : '');
+      // Jangan tampilkan lagi klasifikasi caption pendek yang tersimpan dari
+      // versi extension sebelum batas minimum Auto diberlakukan.
+      // Hasil yang baru selesai mungkin sudah tersimpan sebelum background
+      // mematikan loading. Simpan di state; visibleAutoResult menunggu loading.
+      if (savedAutoResult && !savedError) setAutoResult(savedAutoResult);
+      setAutoError(savedError);
+      setAutoPageUrl((stored.autoPageUrl as string | undefined) || savedAutoResult?.url || '');
       if (typeof stored.extensionEnabled === 'boolean') setIsEnabled(stored.extensionEnabled);
-      if (stored.autoChecking === true) setAutoState('loading');
+      setAutoState(stored.autoChecking === true ? 'loading' : savedError ? 'error' : 'idle');
       if (stored.autoProgress) setAutoProgress(stored.autoProgress as AutoProgress);
       if (stored.selectedMode === 'auto' || stored.selectedMode === 'manual') setMode(stored.selectedMode);
       else browser.storage.local.set({ selectedMode: 'auto' });
@@ -139,11 +154,34 @@ function Popup() {
   // Popup langsung mengosongkan hasil lama saat halaman baru memulai pemeriksaan Auto.
   useEffect(() => {
     const handleStorageChange = (changes: Record<string, { newValue?: unknown }>, areaName: string) => {
+      if (areaName === 'local' && changes.lastResult) {
+        const nextResult = (changes.lastResult.newValue as LastResult | null | undefined) ?? null;
+        const contentError = nextResult ? getManualContentError(nextResult.text) : '';
+        setResult(contentError ? null : nextResult);
+        setManualError(contentError);
+      }
+      if (areaName === 'local' && changes.manualError) {
+        setManualError((changes.manualError.newValue as string | undefined) ?? '');
+      }
       if (areaName === 'local' && changes.lastAutoResult) {
-        setAutoResult((changes.lastAutoResult.newValue as LastResult | undefined) ?? null);
+        const nextResult = (changes.lastAutoResult.newValue as LastResult | null | undefined) ?? null;
+        const contentError = nextResult ? getAutoContentError(nextResult.text, nextResult.url) : '';
+        setAutoResult(contentError ? null : nextResult);
+        if (contentError) setAutoError(contentError);
+      }
+      if (areaName === 'local' && changes.autoError) {
+        setAutoError((changes.autoError.newValue as string | undefined) ?? '');
+      }
+      if (areaName === 'local' && changes.autoPageUrl) {
+        setAutoPageUrl((changes.autoPageUrl.newValue as string | undefined) ?? '');
       }
       if (areaName === 'local' && changes.autoChecking) {
-        setAutoState(changes.autoChecking.newValue === true ? 'loading' : 'idle');
+        const checking = changes.autoChecking.newValue === true;
+        setAutoState(checking ? 'loading' : changes.autoError?.newValue ? 'error' : 'idle');
+        if (checking) {
+          setAutoResult(null);
+          setAutoError('');
+        }
       }
       if (areaName === 'local' && changes.autoProgress?.newValue) {
         setAutoProgress(changes.autoProgress.newValue as AutoProgress);
@@ -153,7 +191,8 @@ function Popup() {
     return () => browser.storage.onChanged.removeListener(handleStorageChange);
   }, []);
 
-  const currentUrl = (mode === 'auto' ? autoResult?.url : result?.url) || 'WWW.EXAMPLE.COM';
+  const visibleAutoResult = autoState !== 'loading' && !autoError ? autoResult : null;
+  const currentUrl = (mode === 'auto' ? autoPageUrl || visibleAutoResult?.url : result?.url) || 'WWW.EXAMPLE.COM';
 
   return (
     <main
@@ -205,11 +244,10 @@ function Popup() {
       {mode === 'auto' ? (
         !isEnabled ? <DisabledState /> : (
           <section className="auto-content" aria-live="polite">
-            <div className={`article-card ${autoResult ? 'has-result' : ''}`}>
+            <div className={`article-card ${visibleAutoResult ? 'has-result' : ''}`}>
               <p>
                 {autoState === 'loading' ? 'Sedang mengecek website...'
-                  : autoResult ? autoResult.text
-                    : autoError || 'Tekan tombol di bawah untuk mengekstrak artikel dari halaman ini secara otomatis.'}
+                  : autoError || visibleAutoResult?.text || 'Tekan tombol di bawah untuk mengekstrak artikel dari halaman ini secara otomatis.'}
               </p>
             </div>
             {autoState === 'loading' && (
@@ -230,21 +268,21 @@ function Popup() {
                 </div>
               </div>
             )}
-            {autoResult && (
+            {visibleAutoResult && (
               <>
-                <ResultDetails result={autoResult} />
-                <div className="auto-source" title={autoResult.data.article?.title ?? undefined}>
-                  {autoResult.data.article?.title || 'Artikel tanpa judul'}
+                <ResultDetails result={visibleAutoResult} />
+                <div className="auto-source" title={visibleAutoResult.data.article?.title ?? undefined}>
+                  {visibleAutoResult.data.article?.title || 'Artikel tanpa judul'}
                   <span>
-                    {autoResult.data.article?.source || 'Sumber tidak diketahui'} · {autoResult.data.article?.quality === 'clean' ? 'Konten bersih' : 'Konten perlu ditinjau'}
-                    {autoResult.data.article?.published ? ` · ${new Date(autoResult.data.article.published).toLocaleDateString('id-ID')}` : ''}
+                    {visibleAutoResult.data.article?.source || 'Sumber tidak diketahui'} · {visibleAutoResult.data.article?.quality === 'clean' ? 'Konten bersih' : 'Konten perlu ditinjau'}
+                    {visibleAutoResult.data.article?.published ? ` · ${new Date(visibleAutoResult.data.article.published).toLocaleDateString('id-ID')}` : ''}
                   </span>
                 </div>
-                {autoResult.data.article?.steps?.length ? (
+                {visibleAutoResult.data.article?.steps?.length ? (
                   <details className="auto-steps">
                     <summary>Detail ekstraksi</summary>
                     <ul>
-                      {autoResult.data.article.steps.map((step) => (
+                      {visibleAutoResult.data.article.steps.map((step) => (
                         <li className={step.status} key={step.key}>{step.label}</li>
                       ))}
                     </ul>
@@ -259,14 +297,14 @@ function Popup() {
         )
       ) : !isEnabled ? <DisabledState /> : (
         <section className="manual-content" aria-live="polite">
-          <div className={result ? 'article-card has-result' : 'article-card'}>
-            <p>{result ? result.text : 'Pilih atau highlight teks pada halaman, lalu tekan tombol Cek Fakta untuk memulai pemeriksaan.'}</p>
+          <div className={result && !manualError ? 'article-card has-result' : 'article-card'}>
+            <p>{manualError || (result ? result.text : `Pilih atau highlight minimal ${MIN_MANUAL_CONTENT_WORDS} kata pada halaman, lalu tekan tombol Cek Fakta untuk memulai pemeriksaan.`)}</p>
           </div>
-          {result ? <ResultDetails result={result} /> : <div className="checking-pill">Menunggu teks dipilih</div>}
+          {result && !manualError ? <ResultDetails result={result} /> : <div className="checking-pill">{manualError ? 'Pemeriksaan tidak berhasil' : 'Menunggu teks dipilih'}</div>}
         </section>
       )}
 
-      {mode === 'manual' && <p className="manual-hint">Mode manual aktif - pilih teks pada halaman untuk cek fakta.</p>}
+      {mode === 'manual' && <p className="manual-hint">Mode manual aktif - pilih minimal {MIN_MANUAL_CONTENT_WORDS} kata untuk cek fakta.</p>}
       </div>
 
       {/* Selalu tersedia pada layar Auto/Manual, loading, error, dan nonaktif. */}

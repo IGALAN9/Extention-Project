@@ -1,8 +1,10 @@
+import { getAutoContentError, getManualContentError, MIN_AUTO_CONTENT_LENGTH, MIN_AUTO_SOCIAL_WORDS, normalizeAutoContent } from '../utils/auto-content';
+
 /**
  * Fungsi mandiri yang disuntikkan langsung ke tab aktif untuk mode Auto.
  * Tidak boleh memakai closure karena browser menserialisasi fungsi ini ke halaman.
  */
-function extractArticleFromActivePage() {
+function extractArticleFromActivePage(minimumLength: number, minimumSocialWords: number) {
   const removeNoise = (text: string) => text
     // Dateline Kompas muncul langsung di paragraf pertama, terpisah dari
     // variabel keywordBrandSafety yang berada di dalam <script>.
@@ -68,6 +70,9 @@ function extractArticleFromActivePage() {
   const isReddit = /(^|\.)reddit\.com$/i.test(location.hostname);
   const isTurnbackhoax = /(^|\.)turnbackhoax\.id$/i.test(location.hostname);
   const isLiputan6 = /(^|\.)liputan6\.com$/i.test(location.hostname);
+  // Sepuluh kata satu huruf pun tetap valid (19 karakter termasuk spasi).
+  // Filter kandidat lama 20/25 karakter tidak boleh menolak caption tersebut.
+  const minimumCaptionCandidateLength = Math.max(1, minimumSocialWords * 2 - 1);
   const mostVisible = <T extends Element>(nodes: T[]) => nodes
     .map((node) => {
       const rect = node.getBoundingClientRect();
@@ -103,7 +108,9 @@ function extractArticleFromActivePage() {
     for (const selector of preferredSelectors) {
       const candidate = Array.from(document.querySelectorAll(selector))
         .map((node) => ({ node, length: paragraphLength(node) }))
-        .filter(({ length }) => length >= 150)
+        // Tetap pilih container artikel yang pendek. Memperlebar pencarian ke
+        // body di sini bisa membuat menu/rekomendasi ikut memenuhi batas 300.
+        .filter(({ length }) => length > 0)
         .sort((a, b) => b.length - a.length)[0]?.node;
       if (candidate) return candidate;
     }
@@ -122,7 +129,7 @@ function extractArticleFromActivePage() {
         const score = paragraphChars * (1 - linkDensity) + paragraphs.length * 80 + semanticBonus - noisePenalty;
         return { node, score, paragraphChars };
       })
-      .filter(({ paragraphChars }) => paragraphChars >= 150)
+      .filter(({ paragraphChars }) => paragraphChars > 0)
       .sort((a, b) => b.score - a.score)[0]?.node ?? document.body;
   };
   const extractInstagramCaption = () => {
@@ -130,7 +137,7 @@ function extractArticleFromActivePage() {
     const candidates = article
       ? Array.from(article.querySelectorAll('span[dir="auto"], div[dir="auto"], h1'))
           .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
-          .filter((text) => text.length >= 25)
+          .filter((text) => text.length >= minimumCaptionCandidateLength)
           .filter((text) => !/^(View all|Lihat semua|Follow|Following|Balas|Reply|Like|Suka|Translate|Terjemahkan|See translation)/i.test(text))
       : [];
     // Caption biasanya merupakan blok teks terpanjang di dalam article, sedangkan
@@ -156,7 +163,7 @@ function extractArticleFromActivePage() {
       : Array.from((selectedTweet || document).querySelectorAll('div[dir="auto"], span[dir="auto"]'));
     const candidates = fallbackNodes
       .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
-      .filter((text) => text.length >= 20)
+      .filter((text) => text.length >= minimumCaptionCandidateLength)
       .filter((text) => !/^(Replying to|Log in|Sign up|Translate|Show more|Show less)/i.test(text));
     return candidates[0] ?? '';
   };
@@ -198,7 +205,7 @@ function extractArticleFromActivePage() {
         const rect = node.getBoundingClientRect();
         const visible = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0;
         const normalized = text.toLocaleLowerCase('id-ID');
-        if (!visible || text.length < 20 || seenTexts.has(normalized)) return null;
+        if (!visible || text.length < minimumCaptionCandidateLength || seenTexts.has(normalized)) return null;
         seenTexts.add(normalized);
         if (/Missing context|third-party fact-checkers|See why/i.test(text)) return null;
         if (/^(Like|Suka|Comment|Komentar|Share|Bagikan|Follow|Ikuti|See more|See less|Lihat selengkapnya)$/i.test(text)) return null;
@@ -225,7 +232,7 @@ function extractArticleFromActivePage() {
     const scope = post || document;
     const candidates = Array.from(scope.querySelectorAll('div[dir="auto"], span[dir="auto"]'))
       .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
-      .filter((text) => text.length >= 20)
+      .filter((text) => text.length >= minimumCaptionCandidateLength)
       .filter((text) => !/^(Translate|Follow|Following|Reply|Like|Repost|Share|See translation|Log in|Sign up)/i.test(text))
       .filter((text) => !/third-party fact-check|missing context/i.test(text));
     // Pada halaman Thread, caption muncul lebih dulu sebelum daftar komentar.
@@ -381,11 +388,26 @@ function extractArticleFromActivePage() {
     }
   }
   const content = stripNewsDateline(trimLead(removeNoise(rawText))).slice(0, 10000);
-  const minimumLength = isInstagram || isTwitter || isFacebook || isThreads || isReddit || isTurnbackhoax ? 20 : 300;
-  if (content.length < minimumLength) {
-    const platform = isInstagram ? 'Instagram' : isTwitter ? 'X' : isFacebook ? 'Facebook' : isThreads ? 'Threads' : isReddit ? 'Reddit' : isTurnbackhoax ? 'Turnbackhoax' : '';
-    steps.push({ key: 'extract_content', label: platform ? `Caption ${platform} tidak ditemukan atau terlalu singkat` : 'Konten artikel terlalu singkat', status: 'fail' });
-    return { success: false, error: platform ? `Caption ${platform} tidak ditemukan. Silakan gunakan mode Manual.` : 'Artikel terlalu singkat untuk diperiksa otomatis. Silakan gunakan mode Manual.', steps };
+  const isSocialMedia = isInstagram || isTwitter || isFacebook || isThreads || isReddit;
+  // Fungsi suntikan harus mandiri. Perhitungan ini sama dengan validator di
+  // background/popup: link, emoji, dan tanda baca saja tidak dihitung sebagai kata.
+  const wordCount = content.split(/\s+/)
+    .filter((word) => /[\p{L}\p{N}]/u.test(word) && !/^(?:https?:\/\/|www\.)/i.test(word)).length;
+  const tooShort = isSocialMedia ? wordCount < minimumSocialWords : content.length < minimumLength;
+  if (tooShort) {
+    const count = isSocialMedia ? wordCount : content.length;
+    const minimum = isSocialMedia ? minimumSocialWords : minimumLength;
+    const unit = isSocialMedia ? 'kata' : 'karakter';
+    const subject = isSocialMedia ? 'Caption' : 'Konten';
+    steps.push({ key: 'extract_content', label: `${subject} terlalu singkat (${count}/${minimum} ${unit})`, status: 'fail' });
+    return {
+      success: false,
+      error: `${subject} terlalu singkat untuk diperiksa otomatis (${count}/${minimum} ${unit}). Minimal ${minimum} ${unit}.${isSocialMedia ? '' : ' Silakan gunakan mode Manual untuk teks pendek.'}`,
+      // Ulangi hanya jika konten belum muncul. Caption pendek yang sudah
+      // ditemukan langsung ditolak, tanpa mengirim permintaan ke model.
+      retryable: content.length === 0,
+      steps,
+    };
   }
   steps.push({ key: 'extract_content', label: 'Isi konten berhasil diekstrak', status: 'success' });
   const noiseHits = (rawText.match(/ADVERTISEMENT|IKLAN|Baca Juga|Bagikan|Dengarkan artikel/gi) ?? []).length;
@@ -406,6 +428,9 @@ function extractArticleFromActivePage() {
 }
 
 export default defineBackground(() => {
+  // Hanya pemeriksaan Auto terbaru yang boleh memperbarui state popup.
+  let activeAutoRequestId = 0;
+
   browser.runtime.onMessage.addListener((message, sender) => {
     const explainText = async (text: string) => {
       const res = await fetch('http://localhost:8000/predict/explain', {
@@ -423,36 +448,88 @@ export default defineBackground(() => {
       };
     };
 
-    const setAutoProgress = (percent: number, label: string) => browser.storage.local.set({
-      autoProgress: { percent: Math.max(0, Math.min(100, percent)), label },
-    });
+    const isCurrentRequest = (requestId: number) => requestId === activeAutoRequestId;
+    const setAutoProgress = async (requestId: number, percent: number, label: string) => {
+      if (!isCurrentRequest(requestId)) return;
+      await browser.storage.local.set({
+        autoProgress: { percent: Math.max(0, Math.min(100, percent)), label },
+      });
+    };
+    const beginAutoCheck = async (url: string, waitingForPage = false) => {
+      const requestId = ++activeAutoRequestId;
+      await browser.storage.local.set({
+        lastAutoResult: null,
+        autoError: '',
+        autoPageUrl: url,
+        autoChecking: true,
+        autoProgress: {
+          percent: waitingForPage ? 5 : 10,
+          label: waitingForPage ? 'Menunggu halaman siap diperiksa...' : 'Menyiapkan pemeriksaan...',
+        },
+      });
+      await browser.action.setBadgeText({ text: '' });
+      return requestId;
+    };
+    const finishAutoCheck = async (requestId: number, error = '') => {
+      if (!isCurrentRequest(requestId)) return;
+      await browser.storage.local.set({
+        autoChecking: false,
+        autoError: error,
+        ...(error ? { lastAutoResult: null } : {}),
+      });
+    };
+    const autoFailure = (error: unknown) => {
+      const detail = error instanceof Error ? error.message : '';
+      const blockedPage = /Cannot access contents of url|Cannot access a chrome|Missing host permission/i.test(detail);
+      return {
+        success: false,
+        error: blockedPage
+          ? 'Mode Auto tidak dapat membaca halaman internal browser atau halaman yang dibatasi.'
+          : detail || 'Gagal membaca artikel pada halaman ini.',
+      };
+    };
 
     /** Jalankan ekstraksi DOM dan XAI untuk satu tab; dipakai klik popup dan auto saat halaman dibuka. */
-    const inspectAutoPage = async (tabId: number, fallbackUrl = '', attempt = 0) => {
+    const inspectAutoPage = async (tabId: number, fallbackUrl: string, requestId: number, attempt = 0) => {
+      if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
       const extractionProgress = Math.min(25 + attempt * 5, 50);
-      await setAutoProgress(extractionProgress, 'Membaca struktur halaman...');
+      await setAutoProgress(requestId, extractionProgress, 'Membaca struktur halaman...');
       const [injection] = await browser.scripting.executeScript({
         target: { tabId },
         func: extractArticleFromActivePage,
+        args: [MIN_AUTO_CONTENT_LENGTH, MIN_AUTO_SOCIAL_WORDS],
       });
+      if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
       const extracted = injection?.result;
       if (!extracted?.success || !extracted.article) {
-        return { success: false, error: extracted?.error || 'Artikel tidak dapat diekstrak dari halaman ini.' };
+        return {
+          success: false,
+          error: extracted?.error || 'Artikel tidak dapat diekstrak dari halaman ini.',
+          retryable: extracted?.retryable ?? false,
+        };
       }
-      await setAutoProgress(55, 'Isi artikel berhasil ditemukan dan dibersihkan');
-      await setAutoProgress(72, 'Mengirim artikel ke model prediksi...');
-      const data = await explainText(extracted.article.content);
-      await setAutoProgress(90, 'Menyusun hasil prediksi dan penjelasan XAI...');
+      // Validasi kedua tepat sebelum API: jangan klasifikasikan teks pendek
+      // walaupun suatu extractor mengembalikannya sebagai ekstraksi sukses.
+      const content = normalizeAutoContent(extracted.article.content);
+      const contentError = getAutoContentError(content, extracted.article.url || fallbackUrl);
+      if (contentError) return { success: false, error: contentError, retryable: false };
+      await setAutoProgress(requestId, 55, 'Isi artikel berhasil ditemukan dan dibersihkan');
+      await setAutoProgress(requestId, 72, 'Mengirim artikel ke model prediksi...');
+      if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
+      const data = await explainText(content);
+      if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
+      await setAutoProgress(requestId, 90, 'Menyusun hasil prediksi dan penjelasan XAI...');
       const result = {
-        text: extracted.article.content,
+        text: content,
         url: extracted.article.url ?? fallbackUrl ?? extracted.article.source,
-        data: { ...data, article: extracted.article },
+        data: { ...data, article: { ...extracted.article, content } },
         timestamp: Date.now(),
       };
+      if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
       await browser.storage.local.set({ lastAutoResult: result });
       browser.action.setBadgeText({ text: '1' });
       browser.action.setBadgeBackgroundColor({ color: '#ff5a17' });
-      await setAutoProgress(100, 'Pemeriksaan selesai');
+      await setAutoProgress(requestId, 100, 'Pemeriksaan selesai');
       return { success: true, result };
     };
 
@@ -463,50 +540,53 @@ export default defineBackground(() => {
     }
 
     if (message.type === 'CHECK_TEXT') {
-      return browser.storage.local.get('extensionEnabled').then((stored) => {
+      return browser.storage.local.get('extensionEnabled').then(async (stored) => {
         if (stored.extensionEnabled === false) {
           return { success: false, error: 'Pemeriksaan extension sedang dimatikan.' };
         }
 
+        // Validasi di background menjaga semua jalur Manual, bukan hanya tombol UI.
+        const text = typeof message.text === 'string' ? message.text : '';
+        const contentError = getManualContentError(text);
+        await browser.storage.local.set({ lastResult: null, manualError: contentError });
+        await browser.action.setBadgeText({ text: '' });
+        if (contentError) return { success: false, error: contentError };
+
         // Endpoint XAI juga mengembalikan label dan confidence, serta skor SHAP per kata.
-        return explainText(message.text)
+        return explainText(text)
           .then(async (data) => {
           const result = {
-            text: message.text,
+            text,
             url: sender.tab?.url ?? '',
             data,
             timestamp: Date.now(),
           };
-          await browser.storage.local.set({ lastResult: result });
+          await browser.storage.local.set({ lastResult: result, manualError: '' });
           browser.action.setBadgeText({ text: '1' });
           browser.action.setBadgeBackgroundColor({ color: '#2563eb' });
           return { success: true, data };
         })
-        .catch((err) => ({ success: false, error: err.message }));
+        .catch(async (err) => {
+          await browser.storage.local.set({ lastResult: null, manualError: err.message });
+          return { success: false, error: err.message };
+        });
       });
     }
 
     if (message.type === 'CHECK_AUTO_PAGE') {
       return browser.storage.local.get('extensionEnabled').then(async (stored) => {
         if (stored.extensionEnabled === false) return { success: false, error: 'Pemeriksaan extension sedang dimatikan.' };
-        await browser.storage.local.set({
-          autoChecking: true,
-          autoProgress: { percent: 10, label: 'Menyiapkan pemeriksaan...' },
-        });
+        const pageUrl = message.url ?? sender.tab?.url ?? '';
+        const requestId = await beginAutoCheck(pageUrl);
         try {
-          await browser.storage.local.remove('lastAutoResult');
-          return await inspectAutoPage(message.tabId, sender.tab?.url ?? '');
+          const response = await inspectAutoPage(message.tabId, pageUrl, requestId);
+          await finishAutoCheck(requestId, response.error);
+          return response;
         } catch (err) {
-          const message = err instanceof Error ? err.message : '';
-          const blockedPage = /Cannot access contents of url|Cannot access a chrome|Missing host permission/i.test(message);
-          return {
-            success: false,
-            error: blockedPage
-              ? 'Mode Auto tidak dapat membaca halaman internal browser atau halaman yang dibatasi.'
-              : message || 'Gagal membaca artikel pada halaman ini.',
-          };
-        } finally {
-          await browser.storage.local.set({ autoChecking: false });
+          if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
+          const response = autoFailure(err);
+          await finishAutoCheck(requestId, response.error);
+          return response;
         }
       });
     }
@@ -515,12 +595,7 @@ export default defineBackground(() => {
     if (message.type === 'AUTO_PAGE_OPENED') {
       return browser.storage.local.get(['extensionEnabled', 'selectedMode']).then(async (stored) => {
         if (stored.extensionEnabled !== false && stored.selectedMode !== 'manual') {
-          await browser.storage.local.remove('lastAutoResult');
-          await browser.storage.local.set({
-            autoChecking: true,
-            autoProgress: { percent: 5, label: 'Menunggu halaman siap diperiksa...' },
-          });
-          browser.action.setBadgeText({ text: '' });
+          await beginAutoCheck(sender.tab?.url ?? '', true);
         }
         return { success: true };
       });
@@ -533,13 +608,9 @@ export default defineBackground(() => {
         if (stored.extensionEnabled === false || stored.selectedMode === 'manual' || !sender.tab?.id) {
           return { success: false, skipped: true };
         }
+        const pageUrl = sender.tab.url ?? '';
+        const requestId = await beginAutoCheck(pageUrl);
         try {
-          await browser.storage.local.set({
-            autoChecking: true,
-            autoProgress: { percent: 10, label: 'Menyiapkan pemeriksaan...' },
-          });
-          await browser.storage.local.remove('lastAutoResult');
-          const pageUrl = sender.tab.url ?? '';
           const pageHost = new URL(pageUrl).hostname;
           const isSocialPage = /(^|\.)facebook\.com$/i.test(pageHost)
             || /(^|\.)(x|twitter)\.com$/i.test(pageHost)
@@ -552,20 +623,22 @@ export default defineBackground(() => {
           // beberapa detik setelah shell halaman muncul.
           // Coba sekarang, lalu ulangi tiap 5 detik maksimal 6 kali (30 detik).
           for (let attempt = 0; attempt < (isSocialPage ? 6 : 1); attempt += 1) {
-            latestResult = await inspectAutoPage(sender.tab.id, pageUrl, attempt);
-            if (latestResult.success || !isSocialPage || attempt === 5) return latestResult;
+            latestResult = await inspectAutoPage(sender.tab.id, pageUrl, requestId, attempt);
+            if (latestResult.success || latestResult.skipped || !latestResult.retryable || !isSocialPage || attempt === 5) break;
             await setAutoProgress(
+              requestId,
               Math.min(30 + attempt * 6, 55),
               `Menunggu konten halaman dimuat (${attempt + 1}/6)...`,
             );
             await new Promise((resolve) => setTimeout(resolve, 5000));
           }
+          await finishAutoCheck(requestId, latestResult?.error);
           return latestResult ?? { success: false, skipped: true };
-        } catch {
-          // Tidak mengganggu halaman pengguna bila URL bukan artikel atau tidak dapat diekstrak.
-          return { success: false, skipped: true };
-        } finally {
-          await browser.storage.local.set({ autoChecking: false });
+        } catch (err) {
+          if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
+          const response = autoFailure(err);
+          await finishAutoCheck(requestId, response.error);
+          return response;
         }
       });
     }

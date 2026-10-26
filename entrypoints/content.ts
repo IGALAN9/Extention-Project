@@ -205,6 +205,7 @@ export default defineContentScript({
 
       const preview = document.createElement('div');
       preview.textContent = `"${text.slice(0, 60)}${text.length > 60 ? '...' : ''}"`;
+      preview.setAttribute('aria-live', 'polite');
       Object.assign(preview.style, {
         lineHeight: '1.25',
         maxHeight: '31px',
@@ -230,6 +231,8 @@ export default defineContentScript({
         console.log('[CONTENT] Button clicked, sending message for text:', text);
         btn.textContent = 'Memeriksa...';
         btn.disabled = true;
+        // Pesan validasi minimal kata harus terbaca penuh, bukan terpotong preview.
+        preview.style.maxHeight = 'none';
 
         try {
           const response = await browser.runtime.sendMessage({ type: 'CHECK_TEXT', text });
