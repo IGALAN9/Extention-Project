@@ -1,4 +1,5 @@
 import { getAutoContentError, getManualContentError, MIN_AUTO_CONTENT_LENGTH, MIN_AUTO_SOCIAL_WORDS, normalizeAutoContent } from '../utils/auto-content';
+import { setExtensionBadge } from '../utils/extension-action';
 
 /**
  * Fungsi mandiri yang disuntikkan langsung ke tab aktif untuk mode Auto.
@@ -467,7 +468,7 @@ export default defineBackground(() => {
           label: waitingForPage ? 'Menunggu halaman siap diperiksa...' : 'Menyiapkan pemeriksaan...',
         },
       });
-      await browser.action.setBadgeText({ text: '' });
+      await setExtensionBadge('');
       return requestId;
     };
     const finishAutoCheck = async (requestId: number, error = '') => {
@@ -527,8 +528,7 @@ export default defineBackground(() => {
       };
       if (!isCurrentRequest(requestId)) return { success: false, skipped: true };
       await browser.storage.local.set({ lastAutoResult: result });
-      browser.action.setBadgeText({ text: '1' });
-      browser.action.setBadgeBackgroundColor({ color: '#ff5a17' });
+      await setExtensionBadge('1', '#ff5a17');
       await setAutoProgress(requestId, 100, 'Pemeriksaan selesai');
       return { success: true, result };
     };
@@ -549,7 +549,7 @@ export default defineBackground(() => {
         const text = typeof message.text === 'string' ? message.text : '';
         const contentError = getManualContentError(text);
         await browser.storage.local.set({ lastResult: null, manualError: contentError });
-        await browser.action.setBadgeText({ text: '' });
+        await setExtensionBadge('');
         if (contentError) return { success: false, error: contentError };
 
         // Endpoint XAI juga mengembalikan label dan confidence, serta skor SHAP per kata.
@@ -562,8 +562,7 @@ export default defineBackground(() => {
             timestamp: Date.now(),
           };
           await browser.storage.local.set({ lastResult: result, manualError: '' });
-          browser.action.setBadgeText({ text: '1' });
-          browser.action.setBadgeBackgroundColor({ color: '#2563eb' });
+          await setExtensionBadge('1', '#2563eb');
           return { success: true, data };
         })
         .catch(async (err) => {

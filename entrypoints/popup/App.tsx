@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import AboutPage from './AboutPage';
 import { getAutoContentError, getManualContentError, MIN_MANUAL_CONTENT_WORDS } from '../../utils/auto-content';
+import { setExtensionBadge } from '../../utils/extension-action';
 import './App.css';
 
 type WordScore = { word: string; score: number };
@@ -147,7 +148,7 @@ function Popup() {
       if (stored.selectedMode === 'auto' || stored.selectedMode === 'manual') setMode(stored.selectedMode);
       else browser.storage.local.set({ selectedMode: 'auto' });
     });
-    browser.action.setBadgeText({ text: '' });
+    void setExtensionBadge('');
     checkApiStatus();
   }, []);
 

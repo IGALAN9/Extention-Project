@@ -13,6 +13,7 @@ const validationModule = { exports: {} };
 vm.runInNewContext(compile('utils/auto-content.ts'), { exports: validationModule.exports, URL });
 const validation = validationModule.exports;
 const backgroundCode = compile('entrypoints/background.ts');
+const actionCode = compile('utils/extension-action.ts');
 const shortCaption = 'MBG akhirnya dihentikan';
 const validSocialCaption = 'Informasi ini disampaikan secara resmi untuk menjelaskan kondisi terkini masyarakat';
 const sender = { tab: { id: 1, url: 'https://x.com/example/status/123' } };
@@ -24,7 +25,7 @@ function article(content, url = sender.tab.url) {
 }
 
 /** Jalankan handler background asli dengan API browser/model yang terkontrol. */
-function createBackground({ extract = () => article(shortCaption), predict, stored = {} } = {}) {
+function createBackground({ extract = () => article(shortCaption), predict, stored = {}, manifestVersion = 3, badgeFails = false } = {}) {
   const state = { extensionEnabled: true, selectedMode: 'auto', ...stored };
   const requests = [];
   const injections = [];
@@ -41,17 +42,29 @@ function createBackground({ extract = () => article(shortCaption), predict, stor
       injections.push(options);
       return [{ result: await extract(injections.length) }];
     } },
-    action: {
-      setBadgeText: async ({ text }) => { badge = text; },
+    [manifestVersion === 2 ? 'browserAction' : 'action']: {
+      setBadgeText: async ({ text }) => {
+        if (badgeFails) throw new Error('Badge tidak tersedia');
+        badge = text;
+      },
       setBadgeBackgroundColor: async () => {},
     },
   };
+  const actionModule = { exports: {} };
+  vm.runInNewContext(actionCode, {
+    exports: actionModule.exports,
+    require: (name) => {
+      assert.equal(name, 'wxt/browser');
+      return { browser };
+    },
+  });
   vm.runInNewContext(backgroundCode, {
     exports: {}, browser, Error, URL,
     defineBackground: (fn) => fn(),
     require: (name) => {
-      assert.equal(name, '../utils/auto-content');
-      return validation;
+      if (name === '../utils/auto-content') return validation;
+      assert.equal(name, '../utils/extension-action');
+      return actionModule.exports;
     },
     fetch: async (url, options) => {
       requests.push({ url, text: JSON.parse(options.body).text });
@@ -273,4 +286,45 @@ test('Manual menerima teks lebih dari 10 kata', async () => {
   assert.equal(bg.requests[0].text, text);
   assert.equal(bg.state.lastResult.text, text);
   assert.equal(bg.injections.length, 0);
+});
+
+test('Firefox/MV2: Auto halaman baru, tombol Auto, dan Manual tetap bekerja dengan browserAction', async () => {
+  for (const message of [
+    { type: 'CHECK_AUTO_FROM_PAGE' },
+    { type: 'CHECK_AUTO_PAGE', tabId: 1, url: sender.tab.url },
+    { type: 'CHECK_TEXT', text: validSocialCaption },
+  ]) {
+    const bg = createBackground({ manifestVersion: 2, extract: () => article(validSocialCaption) });
+    const response = await bg.send(message);
+    assert.equal(response.success, true);
+    assert.equal(bg.requests.length, 1);
+    assert.equal(bg.badge(), '1');
+  }
+  const bg = createBackground({ manifestVersion: 2, stored: { lastAutoResult: { text: 'hasil lama' } } });
+  const response = await bg.send({ type: 'AUTO_PAGE_OPENED' });
+  assert.equal(response.success, true);
+  assert.equal(bg.state.lastAutoResult, null);
+  assert.equal(bg.state.autoChecking, true);
+});
+
+test('Firefox/MV2: validasi 10 kata tetap menolak teks pendek tanpa memanggil API', async () => {
+  for (const message of [{ type: 'CHECK_TEXT', text: shortCaption }, { type: 'CHECK_AUTO_FROM_PAGE' }]) {
+    const bg = createBackground({ manifestVersion: 2 });
+    const response = await bg.send(message);
+    assert.equal(response.success, false);
+    assert.match(response.error, /3\/10 kata/);
+    assert.equal(bg.requests.length, 0);
+  }
+});
+
+test('kegagalan badge tidak boleh menggagalkan pemeriksaan di Chrome maupun Firefox', async () => {
+  for (const manifestVersion of [2, 3]) {
+    for (const message of [{ type: 'CHECK_TEXT', text: validSocialCaption }, { type: 'CHECK_AUTO_FROM_PAGE' }]) {
+      const bg = createBackground({ manifestVersion, badgeFails: true, extract: () => article(validSocialCaption) });
+      const response = await bg.send(message);
+      assert.equal(response.success, true);
+      assert.equal(bg.requests.length, 1);
+      assert.ok(message.type === 'CHECK_TEXT' ? bg.state.lastResult : bg.state.lastAutoResult);
+    }
+  }
 });
