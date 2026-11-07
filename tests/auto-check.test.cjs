@@ -14,18 +14,24 @@ vm.runInNewContext(compile('utils/auto-content.ts'), { exports: validationModule
 const validation = validationModule.exports;
 const backgroundCode = compile('entrypoints/background.ts');
 const actionCode = compile('utils/extension-action.ts');
+const modelApiCode = compile('utils/model-api.ts');
+const railway = 'https://model-production-ce77.up.railway.app';
+const local = 'http://localhost:8000';
 const shortCaption = 'MBG akhirnya dihentikan';
 const validSocialCaption = 'Informasi ini disampaikan secara resmi untuk menjelaskan kondisi terkini masyarakat';
 const sender = { tab: { id: 1, url: 'https://x.com/example/status/123' } };
 const newsSender = { tab: { id: 1, url: 'https://example.com/artikel' } };
 const payload = { label: 'FAKTA', confidence: 0.9, word_scores: [{ word: 'contoh', score: -0.1 }] };
+const predictionResponse = () => ({ ok: true, json: async () => payload });
+const statusResponse = () => ({ ok: true, json: async () => ({ paths: { '/predict/explain': { post: {} } } }) });
 
 function article(content, url = sender.tab.url) {
   return { success: true, article: { content, title: 'Contoh', url, source: new URL(url).hostname, quality: 'clean', steps: [] } };
 }
 
 /** Jalankan handler background asli dengan API browser/model yang terkontrol. */
-function createBackground({ extract = () => article(shortCaption), predict, stored = {}, manifestVersion = 3, badgeFails = false } = {}) {
+function createBackground({ extract = () => article(shortCaption), predict = predictionResponse, probe = statusResponse,
+  modelTimeout, stored = {}, manifestVersion = 3, badgeFails = false } = {}) {
   const state = { extensionEnabled: true, selectedMode: 'auto', ...stored };
   const requests = [];
   const injections = [];
@@ -58,17 +64,24 @@ function createBackground({ extract = () => article(shortCaption), predict, stor
       return { browser };
     },
   });
+  const apiModule = { exports: {} };
+  vm.runInNewContext(modelApiCode, {
+    exports: apiModule.exports,
+    AbortController, Error, clearTimeout,
+    setTimeout: (fn, ms) => setTimeout(fn, modelTimeout ?? ms),
+    fetch: async (url, options) => {
+      requests.push({ url, text: options.body ? JSON.parse(options.body).text : undefined });
+      return options.method === 'POST' ? predict(url, options) : probe(url, options);
+    },
+  });
   vm.runInNewContext(backgroundCode, {
     exports: {}, browser, Error, URL,
     defineBackground: (fn) => fn(),
     require: (name) => {
       if (name === '../utils/auto-content') return validation;
+      if (name === '../utils/model-api') return apiModule.exports;
       assert.equal(name, '../utils/extension-action');
       return actionModule.exports;
-    },
-    fetch: async (url, options) => {
-      requests.push({ url, text: JSON.parse(options.body).text });
-      return predict ? predict() : { ok: true, json: async () => payload };
     },
     // Retry timer tidak perlu menunggu 5 detik pada pengujian terkontrol.
     setTimeout: (fn) => { queueMicrotask(fn); },
@@ -139,6 +152,7 @@ test('artikel 300 karakter diperiksa dan hasil valid menggantikan pesan error', 
   const response = await bg.send({ type: 'CHECK_AUTO_FROM_PAGE' }, newsSender);
   assert.equal(response.success, true);
   assert.equal(bg.requests.length, 1);
+  assert.equal(bg.requests[0].url, `${railway}/predict/explain`);
   assert.equal(bg.requests[0].text, content);
   assert.equal(bg.state.lastAutoResult.text, content);
   assert.equal(bg.state.autoError, '');
@@ -199,11 +213,12 @@ test('halaman sosial tetap retry saat belum ada konten, lalu memeriksa teks yang
   assert.equal(bg.requests.length, 1);
 });
 
-test('error API pada Auto disimpan, hasil lama dihapus, dan status loading berakhir', async () => {
+test('error kedua API pada Auto disimpan, hasil lama dihapus, dan status loading berakhir', async () => {
   const bg = createBackground({ extract: () => article(validSocialCaption), predict: () => { throw new Error('API tidak tersedia'); } });
   const response = await bg.send({ type: 'CHECK_AUTO_FROM_PAGE' });
-  assert.equal(response.error, 'API tidak tersedia');
-  assert.equal(bg.state.autoError, 'API tidak tersedia');
+  assert.match(response.error, /API Railway dan API lokal tidak tersedia/);
+  assert.deepEqual(bg.requests.map(({ url }) => url), [`${railway}/predict/explain`, `${local}/predict/explain`]);
+  assert.equal(bg.state.autoError, response.error);
   assert.equal(bg.state.autoChecking, false);
   assert.equal(bg.state.lastAutoResult, null);
 });
@@ -272,9 +287,74 @@ test('Manual menyimpan pesan error API tanpa meninggalkan hasil sebelumnya', asy
     predict: () => { throw new Error('API tidak tersedia'); } });
   const response = await bg.send({ type: 'CHECK_TEXT', text: validSocialCaption });
   assert.equal(response.success, false);
-  assert.equal(response.error, 'API tidak tersedia');
+  assert.match(response.error, /API Railway dan API lokal tidak tersedia/);
   assert.equal(bg.state.lastResult, null);
   assert.equal(bg.state.manualError, response.error);
+});
+
+test('Manual mencoba API lokal jika koneksi Railway gagal', async () => {
+  const bg = createBackground({ predict: (url, options) => {
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.equal(options.method, 'POST');
+    if (url.startsWith(railway)) throw new TypeError('Failed to fetch');
+    return predictionResponse();
+  } });
+  const response = await bg.send({ type: 'CHECK_TEXT', text: validSocialCaption });
+  assert.equal(response.success, true);
+  assert.equal(response.data.influentialWords[0].word, 'contoh');
+  assert.deepEqual(bg.requests, [railway, local].map((url) => ({ url: `${url}/predict/explain`, text: validSocialCaption })));
+  assert.equal(bg.state.lastResult.text, validSocialCaption);
+});
+
+test('Auto memakai API lokal jika prediksi Railway tidak tersedia atau formatnya tidak valid', async () => {
+  for (const primary of [
+    { ok: false, status: 503 },
+    { ok: true, json: async () => ({ label: 'FAKTA' }) },
+  ]) {
+    const bg = createBackground({ extract: () => article(validSocialCaption),
+      predict: (url) => url.startsWith(railway) ? primary : predictionResponse() });
+    const result = await bg.send({ type: 'CHECK_AUTO_FROM_PAGE' });
+    assert.equal(result.success, true);
+    assert.deepEqual(bg.requests.map(({ url }) => url), [`${railway}/predict/explain`, `${local}/predict/explain`]);
+    assert.equal(bg.state.autoChecking, false);
+  }
+});
+
+test('prediksi yang menggantung dibatalkan sebelum mencoba API lokal', async () => {
+  let aborted = false;
+  const bg = createBackground({ modelTimeout: 10, predict: (url, { signal }) => url.startsWith(railway)
+    ? new Promise((_, reject) => signal.addEventListener('abort', () => {
+      aborted = true;
+      reject(new Error('Timeout'));
+    }, { once: true }))
+    : predictionResponse() });
+  assert.equal((await bg.send({ type: 'CHECK_TEXT', text: validSocialCaption })).success, true);
+  assert.equal(aborted, true);
+  assert.equal(bg.requests.at(-1).url, `${local}/predict/explain`);
+});
+
+test('input yang ditolak server tidak dikirim ulang ke API cadangan', async () => {
+  const bg = createBackground({ predict: () => ({ ok: false, status: 422, json: async () => ({ detail: 'Input tidak valid.' }) }) });
+  const result = await bg.send({ type: 'CHECK_TEXT', text: validSocialCaption });
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'Input tidak valid.');
+  assert.equal(bg.requests.length, 1);
+  assert.equal(bg.requests[0].url, `${railway}/predict/explain`);
+});
+
+test('status API memilih Railway dulu, lalu lokal jika perlu, dan offline jika keduanya gagal', async () => {
+  const unavailable = () => ({ ok: false, status: 503 });
+  for (const [expected, probe, urls] of [
+    ['railway', statusResponse, [railway]],
+    ['local', (url) => url.startsWith(railway) ? unavailable() : statusResponse(), [railway, local]],
+    [undefined, unavailable, [railway, local]],
+  ]) {
+    const bg = createBackground({ probe });
+    const status = await bg.send({ type: 'GET_API_STATUS' });
+    assert.equal(status.online, Boolean(expected));
+    assert.equal(status.source, expected);
+    assert.deepEqual(bg.requests.map(({ url }) => url), urls.map((url) => `${url}/openapi.json`));
+  }
 });
 
 test('Manual menerima teks lebih dari 10 kata', async () => {

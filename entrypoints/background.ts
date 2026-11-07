@@ -1,5 +1,6 @@
 import { getAutoContentError, getManualContentError, MIN_AUTO_CONTENT_LENGTH, MIN_AUTO_SOCIAL_WORDS, normalizeAutoContent } from '../utils/auto-content';
 import { setExtensionBadge } from '../utils/extension-action';
+import { explainWithModelApi, getModelApiStatus } from '../utils/model-api';
 
 /**
  * Fungsi mandiri yang disuntikkan langsung ke tab aktif untuk mode Auto.
@@ -434,13 +435,7 @@ export default defineBackground(() => {
 
   browser.runtime.onMessage.addListener((message, sender) => {
     const explainText = async (text: string) => {
-      const res = await fetch('http://localhost:8000/predict/explain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      const payload = await res.json();
-      if (!res.ok) throw new Error(payload.detail || 'Gagal menjalankan penjelasan XAI.');
+      const payload = await explainWithModelApi(text);
       return {
         ...payload,
         is_fake: payload.label === 'HOAKS',
@@ -534,9 +529,7 @@ export default defineBackground(() => {
     };
 
     if (message.type === 'GET_API_STATUS') {
-      return fetch('http://localhost:8000/openapi.json', { cache: 'no-store' })
-        .then((response) => ({ online: response.ok }))
-        .catch(() => ({ online: false }));
+      return getModelApiStatus();
     }
 
     if (message.type === 'CHECK_TEXT') {

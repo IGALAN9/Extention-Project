@@ -2,7 +2,6 @@ interface AboutPageProps {
   onBack: () => void;
 }
 
-/** Kredit proyek. Semua gambar dibundel lokal agar tersedia saat offline. */
 function AboutPage({ onBack }: AboutPageProps) {
   return (
     <section className="about-page" aria-labelledby="about-title">

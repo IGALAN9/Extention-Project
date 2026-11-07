@@ -11,7 +11,7 @@ Project ini masih dalam tahap pengembangan aktif.
 **Selesai**
 <br>
 - [x] Reading highlighted text (baca teks yang di-highlight user di halaman)
-- [x] API integration (koneksi extension ke API model lokal)
+- [x] API integration (Railway dengan API lokal sebagai cadangan)
 - [x] Checking / hasil deteksi tampil di popup extension
 <br>
 
@@ -31,4 +31,6 @@ Project ini masih dalam tahap pengembangan aktif.
 
 ### 2. API Model
  
-Extension ini membutuhkan API model yang berjalan (default: `http://localhost:8000`). Jalankan API-nya (via Docker atau langsung) sebelum menggunakan fitur cek fakta.
+Mode Auto dan Manual mengirim teks yang diperiksa ke `https://model-production-ce77.up.railway.app/predict/explain` terlebih dulu. Jika Railway gagal dihubungi, melewati batas waktu prediksi 25 detik, atau tidak bisa melayani prediksi, extension mencoba `http://localhost:8000/predict/explain`. Jalankan API lokal (via Docker atau langsung) agar cadangan tersedia. Permintaan yang ditolak karena input tidak valid tidak dikirim ulang.
+
+Indikator koneksi memeriksa ketersediaan `/openapi.json` dari kedua alamat dengan prioritas yang sama. Indikator ini tidak menjalankan inferensi.
